@@ -1,0 +1,38 @@
+{
+  "name": "agentbase",
+  "version": "1.0.0",
+  "description": "Multi-agent orchestration skill implementing the Planner-Worker-Judge pattern for scaling autonomous coding tasks",
+  "author": {
+    "name": "sidmohan0",
+    "url": "https://github.com/sidmohan0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sidmohan0/agentbase"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/sidmohan0/agentbase",
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "planner-worker-judge",
+    "parallel-development",
+    "workstreams",
+    "task-discovery",
+    "autonomous-coding"
+  ],
+  "skills": [
+    {
+      "name": "agentbase",
+      "path": "skill/SKILL.md",
+      "description": "Hierarchical multi-agent coordination with automatic task discovery"
+    }
+  ],
+  "commands": [
+    {
+      "name": "agentbase",
+      "description": "Multi-agent orchestration commands: init, status, triage, work, parallel, judge"
+    }
+  ],
+  "minimumClaudeCodeVersion": "1.0.0"
+}

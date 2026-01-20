@@ -1,0 +1,17 @@
+{
+  "name": "agentbase",
+  "description": "Multi-agent orchestration skill using the Planner-Worker-Judge pattern from Cursor's research",
+  "version": "1.0.0",
+  "author": "sidmohan0",
+  "repository": "https://github.com/sidmohan0/agentbase",
+  "license": "MIT",
+  "skill_path": "skill/",
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "planner-worker-judge",
+    "parallel",
+    "workstreams",
+    "task-discovery"
+  ]
+}
