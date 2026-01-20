@@ -94,7 +94,7 @@ See [INSTALL.md](INSTALL.md) for detailed instructions.
 **Quick version:**
 ```bash
 # Clone this repo
-git clone https://github.com/YOUR_USERNAME/agentbase.git
+git clone https://github.com/sidmohan0/agentbase.git
 
 # Copy skill to Claude Code skills directory
 cp -r agentbase/skill/ ~/.claude/skills/agentbase/

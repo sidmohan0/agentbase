@@ -6,7 +6,7 @@ Thanks for your interest in contributing to AgentBase!
 
 ### Report Issues
 
-Found a bug or have a feature request? [Open an issue](https://github.com/YOUR_USERNAME/agentbase/issues/new) with:
+Found a bug or have a feature request? [Open an issue](https://github.com/sidmohan0/agentbase/issues/new) with:
 - Clear description of the problem or request
 - Steps to reproduce (for bugs)
 - Your environment (OS, Claude Code version)
@@ -30,7 +30,7 @@ Documentation improvements are always welcome:
 
 ```bash
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/agentbase.git
+git clone https://github.com/sidmohan0/agentbase.git
 cd agentbase
 
 # Create a test project

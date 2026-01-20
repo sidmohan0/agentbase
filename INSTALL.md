@@ -18,7 +18,7 @@ Install once, available in all projects:
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/agentbase.git
+git clone https://github.com/sidmohan0/agentbase.git
 cd agentbase
 
 # Copy to global Claude Code skills directory
@@ -33,7 +33,7 @@ Install per-project (committed to repo):
 ```bash
 # From your project root
 mkdir -p .claude/skills
-git clone https://github.com/YOUR_USERNAME/agentbase.git /tmp/agentbase
+git clone https://github.com/sidmohan0/agentbase.git /tmp/agentbase
 cp -r /tmp/agentbase/skill/ .claude/skills/agentbase/
 rm -rf /tmp/agentbase
 
@@ -47,8 +47,8 @@ git commit -m "Add agentbase skill"
 ```bash
 # Global
 mkdir -p ~/.claude/skills/agentbase/scripts
-curl -o ~/.claude/skills/agentbase/SKILL.md https://raw.githubusercontent.com/YOUR_USERNAME/agentbase/main/skill/SKILL.md
-curl -o ~/.claude/skills/agentbase/scripts/multi-session.sh https://raw.githubusercontent.com/YOUR_USERNAME/agentbase/main/skill/scripts/multi-session.sh
+curl -o ~/.claude/skills/agentbase/SKILL.md https://raw.githubusercontent.com/sidmohan0/agentbase/main/skill/SKILL.md
+curl -o ~/.claude/skills/agentbase/scripts/multi-session.sh https://raw.githubusercontent.com/sidmohan0/agentbase/main/skill/scripts/multi-session.sh
 chmod +x ~/.claude/skills/agentbase/scripts/multi-session.sh
 ```
 
