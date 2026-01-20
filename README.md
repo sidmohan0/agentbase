@@ -4,14 +4,25 @@ A Claude Code skill that implements the Planner-Worker-Judge pattern for multi-a
 
 ## What It Does
 
-AgentBase turns Claude Code into a hierarchical multi-agent system:
+AgentBase turns Claude Code into a hierarchical multi-agent system where **you** are the master orchestrator and an **autonomous Agent Planner** does the work:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                      PLANNER (Claude)                   │
-│  - Explores codebase, creates tasks                     │
-│  - Spawns worker sub-agents                             │
-│  - Evaluates progress (Judge function)                  │
+│              YOU (Master Orchestrator)                   │
+│  - Set goals: /agentbase goals set "fix all bugs"       │
+│  - Launch:    /agentbase go                             │
+│  - Monitor:   /agentbase status                         │
+│  - Stop:      /agentbase stop                           │
+└─────────────────────────────────────────────────────────┘
+                           │
+                    /agentbase go
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│              AGENT PLANNER (Autonomous)                  │
+│  - Discovers tasks from codebase                        │
+│  - Triages and prioritizes                              │
+│  - Spawns workers, evaluates progress                   │
+│  - Reports back to you periodically                     │
 └─────────────────────────────────────────────────────────┘
                            │
            ┌───────────────┼───────────────┐
@@ -33,26 +44,44 @@ cp -r skill/ ~/.claude/skills/agentbase/
 # 2. In Claude Code, initialize your repo
 /agentbase init
 
-# 3. Start working
-/agentbase status      # See current state
-/agentbase triage      # Prioritize work
-/agentbase parallel 3  # Spawn 3 workers on top priorities
+# 3. Set your goal and let it run
+/agentbase goals set "Fix all failing tests"
+/agentbase go          # Launch autonomous Agent Planner
+
+# 4. Monitor and control
+/agentbase status      # Check progress anytime
+/agentbase stop        # Stop when needed
 ```
 
 ## Commands
 
+### Primary (Autonomous Mode)
+
+| Command | Description |
+|---------|-------------|
+| `/agentbase go [goal]` | **Launch autonomous Agent Planner** - the main command |
+| `/agentbase goals` | View/set high-level goals |
+| `/agentbase status` | Check current state and progress |
+| `/agentbase stop` | Signal Agent Planner to stop gracefully |
+
+### Setup
+
 | Command | Description |
 |---------|-------------|
 | `/agentbase init` | Initialize scaffolding in a new repo |
-| `/agentbase status` | Overview of all workstreams and progress |
+| `/agentbase setup` | Create isolated worktree for experimentation |
+| `/agentbase worktree <ws>` | Create a worktree for a specific workstream |
+
+### Manual Mode (run individual phases)
+
+| Command | Description |
+|---------|-------------|
 | `/agentbase triage` | Analyze failures, create prioritized task list |
-| `/agentbase discover` | Scan codebase for tasks (tests, types, TODOs, coverage) |
+| `/agentbase discover` | Scan codebase for tasks |
 | `/agentbase plan <ws>` | Create detailed plan for a workstream |
 | `/agentbase work <ws>` | Spawn a worker for a specific workstream |
 | `/agentbase parallel <n>` | Spawn n workers on top-priority tasks |
 | `/agentbase judge` | Evaluate progress, decide continue/stop/pivot |
-| `/agentbase setup` | Create isolated worktree for experimentation |
-| `/agentbase worktree <ws>` | Create a worktree for a specific workstream |
 
 ## Features
 

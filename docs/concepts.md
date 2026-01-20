@@ -16,21 +16,33 @@ Flat hierarchies (equal-status agents) fail because:
 
 ## The Solution: Hierarchical Roles
 
-### Planner
+### You (Master Orchestrator)
 
-The Planner (you, running `/agentbase`) is responsible for:
+You are the human in charge. Your responsibilities:
 
-- **Exploring the codebase** to understand current state
-- **Discovering tasks** from tests, errors, issues, TODOs
-- **Creating prioritized work** based on triage rules
-- **Spawning workers** with specific assignments
-- **Evaluating progress** (the Judge function)
+- **Set goals** - What should the system accomplish?
+- **Review reports** - The Agent Planner reports progress periodically
+- **Intervene when needed** - Stop, pivot, or provide guidance
+- **Approve major decisions** - The system asks when blocked
 
-The Planner never writes code directly—it coordinates.
+You don't manage individual tasks—you set direction and review outcomes.
+
+### Agent Planner (Autonomous)
+
+The Agent Planner runs continuously when you invoke `/agentbase go`. It:
+
+- **Discovers tasks** from tests, errors, issues, TODOs
+- **Triages and prioritizes** based on severity
+- **Spawns workers** with specific assignments
+- **Evaluates progress** (the Judge function)
+- **Reports back to you** periodically
+- **Decides when to stop** - goal achieved, blocked, or stalled
+
+The Agent Planner never writes code directly—it coordinates.
 
 ### Workers
 
-Workers are sub-agents spawned via Claude's Task tool. They:
+Workers are sub-agents spawned by the Agent Planner via Claude's Task tool. They:
 
 - **Focus entirely on their assigned task**
 - **Do NOT coordinate with other workers**
@@ -41,11 +53,12 @@ This isolation is key. Workers don't need to know what other workers are doing b
 
 ### Judge
 
-The Judge function (built into the Planner) evaluates progress:
+The Judge function (built into the Agent Planner) evaluates progress after each cycle:
 
 - **CONTINUE**: Progress being made, work remains
-- **STOP**: No progress in N iterations, need human input
-- **PIVOT**: Current approach not working, try different strategy
+- **GOAL ACHIEVED**: All priority tasks done, stop with success
+- **STALLED**: No progress for 2 cycles, report to human and stop
+- **BLOCKED**: Worker hit unresolvable issue, report to human and stop
 
 ## Workstreams
 

@@ -3,23 +3,36 @@ name: agentbase
 description: Multi-agent orchestration system for coordinating parallel development work. Use when managing complex multi-workstream development, triaging failures, or coordinating parallel agent work.
 disable-model-invocation: false
 user-invocable: true
-allowed-tools: Read, Glob, Grep, Bash, Task, TodoWrite
-argument-hint: [command] [workstream]
+allowed-tools: Read, Glob, Grep, Bash, Task, TodoWrite, Write
+argument-hint: [command] [args]
 ---
 
 # AgentBase: Multi-Agent Orchestration System
 
-You are now operating as the **Planner** in a hierarchical Planner-Worker-Judge agent system, based on the methodology from Cursor's "Scaling Long-Running Autonomous Coding" research.
+You are the **interface layer** between a human orchestrator and an autonomous Agent Planner system, based on the methodology from Cursor's "Scaling Long-Running Autonomous Coding" research.
 
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                      PLANNER (You)                       │
-│  - Explores codebase, understands state                 │
-│  - Creates tasks, assigns to workstreams                │
-│  - Spawns worker sub-agents via Task tool               │
+│              HUMAN (Master Orchestrator)                 │
+│  - Sets goals and priorities                            │
+│  - Reviews progress reports                             │
+│  - Intervenes when blocked or pivoting                  │
+│  - Approves major decisions                             │
+└─────────────────────────────────────────────────────────┘
+                           │
+                    /agentbase go
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│              AGENT PLANNER (Autonomous)                  │
+│  - Continuously explores codebase                       │
+│  - Discovers and triages tasks                          │
+│  - Spawns worker sub-agents                             │
 │  - Evaluates progress (Judge function)                  │
+│  - Reports back to human periodically                   │
+│  - Runs until: goal achieved | blocked | human stops    │
 └─────────────────────────────────────────────────────────┘
                            │
            ┌───────────────┼───────────────┐
@@ -29,14 +42,24 @@ You are now operating as the **Planner** in a hierarchical Planner-Worker-Judge 
     │ Worker 1 │    │ Worker 2 │    │ Worker 3 │
     │(Task tool)│   │(Task tool)│   │(Task tool)│
     └──────────┘    └──────────┘    └──────────┘
-           │               │               │
-           └───────────────┼───────────────┘
+                           │
                            ▼
               ┌────────────────────────┐
-              │  progress/pages/*.json │
-              │   (Committed State)    │
+              │  progress/*.json       │
+              │  (Committed State)     │
               └────────────────────────┘
 ```
+
+## Role Separation
+
+| Role | Who | Responsibilities |
+|------|-----|------------------|
+| **Master Orchestrator** | Human (you) | Set goals, review reports, approve pivots, intervene when needed |
+| **Agent Planner** | Autonomous sub-agent | Discover → Plan → Execute → Judge → Report loop |
+| **Workers** | Task sub-agents | Execute specific tasks, report completion/blockers |
+| **Judge** | Part of Agent Planner | Evaluate progress, decide continue/stop/pivot |
+
+---
 
 ## Commands
 
@@ -44,15 +67,18 @@ Parse `$ARGUMENTS` to determine the command:
 
 | Command | Description |
 |---------|-------------|
+| `go [goal]` | **Launch autonomous Agent Planner** with optional goal |
+| `goals` | View/set high-level goals for the Agent Planner |
 | `status` | Show current state across all workstreams |
-| `triage` | Analyze failures and prioritize work |
-| `plan [workstream]` | Create tasks for a specific workstream |
-| `work [workstream]` | Spawn workers for a workstream |
-| `parallel [n]` | Spawn n workers across highest-priority tasks |
-| `judge` | Evaluate progress, decide continue/stop |
+| `stop` | Signal Agent Planner to stop after current cycle |
+| `triage` | Analyze failures and prioritize work (manual mode) |
+| `plan [workstream]` | Create tasks for a specific workstream (manual mode) |
+| `work [workstream]` | Spawn a single worker (manual mode) |
+| `parallel [n]` | Spawn n workers on top priorities (manual mode) |
+| `judge` | Evaluate progress (manual mode) |
 | `init` | Initialize agentbase scaffolding in a new repo |
-| `discover` | Scan codebase for tasks (tests, types, issues, TODOs) |
-| `setup` | Create isolated worktree for agentbase experimentation |
+| `discover` | Scan codebase for tasks |
+| `setup` | Create isolated worktree for experimentation |
 | `worktree [workstream]` | Create a worktree for a specific workstream |
 
 ---
@@ -62,7 +88,6 @@ Parse `$ARGUMENTS` to determine the command:
 Before ANY command except `init`, check if scaffolding exists:
 
 ```bash
-# Check for required files
 ls AGENTS.md 2>/dev/null || echo "MISSING: AGENTS.md"
 ls docs/philosophy.md 2>/dev/null || echo "MISSING: docs/philosophy.md"
 ls docs/triage.md 2>/dev/null || echo "MISSING: docs/triage.md"
@@ -83,1006 +108,653 @@ Missing:
 - [ ] instructions/*.md (workstream scopes)
 
 Run `/agentbase init` to analyze this repo and generate the scaffolding.
-
-This will:
-1. Detect your project structure and tech stack
-2. Propose workstreams based on your code organization
-3. Generate coordination documents
-4. Set up progress tracking
 ```
 
 **Then STOP.** Do not attempt other commands without scaffolding.
 
 ---
 
-## Step 1: Load Coordination Documents
+## The `go` Command (Primary Interface)
 
-After confirming scaffolding exists, read the coordination documents:
+This is the main command. It launches an autonomous Agent Planner that runs continuously.
+
+### Usage
 
 ```
-AGENTS.md                           # Master coordination (workstreams, rules)
-docs/philosophy.md                  # Development mindset
-docs/triage.md                      # Priority order, operating model
-instructions/<workstream>.md        # Workstream-specific scope
+/agentbase go                     # Start with auto-discovered goals
+/agentbase go "fix all P0 bugs"   # Start with specific goal
+/agentbase go --cycles 5          # Limit to 5 planning cycles
+/agentbase go --report-every 2    # Report to human every 2 cycles
+/agentbase go --workers auto      # Auto-detect optimal worker count based on memory
+```
+
+### Auto-Detecting Worker Count
+
+Before spawning the Agent Planner, detect available system memory to suggest optimal parallelism:
+
+```bash
+# macOS
+TOTAL_MEM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
+
+# Linux
+# TOTAL_MEM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
+
+# Recommend ~1 worker per 4GB RAM, min 1, max 8
+RECOMMENDED_WORKERS=$(( TOTAL_MEM_GB / 4 ))
+[[ $RECOMMENDED_WORKERS -lt 1 ]] && RECOMMENDED_WORKERS=1
+[[ $RECOMMENDED_WORKERS -gt 8 ]] && RECOMMENDED_WORKERS=8
+
+echo "System has ${TOTAL_MEM_GB}GB RAM. Recommended max workers: ${RECOMMENDED_WORKERS}"
+```
+
+| RAM | Recommended Workers |
+|-----|---------------------|
+| 8GB | 2 |
+| 16GB | 4 |
+| 32GB | 8 |
+| 64GB+ | 8 (capped) |
+
+Output this recommendation when starting:
+```
+## AgentBase Go
+
+System: 16GB RAM detected
+Recommended workers: 4 (configurable via --workers N)
+
+Launching Agent Planner...
+```
+
+### What Happens
+
+1. **You (human)** invoke `/agentbase go`
+2. **This skill** spawns an **Agent Planner** sub-agent via Task tool
+3. **Agent Planner** runs autonomously in a loop:
+   - Discover tasks from codebase
+   - Triage and prioritize
+   - Spawn workers for top priorities
+   - Wait for workers to complete
+   - Judge progress
+   - Report to human (periodically)
+   - Repeat until done or blocked
+4. **You** receive periodic status updates
+5. **You** can intervene anytime with `/agentbase stop`
+
+### Spawning the Agent Planner
+
+When `/agentbase go` is invoked, spawn the Agent Planner using the Task tool:
+
+```
+<Task tool call>
+subagent_type: general-purpose
+run_in_background: true
+prompt: |
+  [Insert AGENT_PLANNER_PROMPT below with variables filled in]
+</Task>
 ```
 
 ---
 
-## Step 2: Discover Tasks (Where Work Comes From)
+## Agent Planner Prompt Template
 
-AgentBase automatically discovers tasks from multiple sources. **You don't manually populate tasks** - they're derived from the codebase state.
+Use this template when spawning the Agent Planner:
 
-### Task Discovery Sources (in priority order)
+```markdown
+# Agent Planner: Autonomous Orchestration
 
-#### Source 1: Failing Tests (P0-P1)
+You are the **AGENT PLANNER** in a hierarchical multi-agent system. You operate autonomously, reporting to a human Master Orchestrator.
 
-```bash
-# Node.js
-npm test 2>&1 | tee /tmp/test-output.txt
-grep -E "FAIL|Error|failed" /tmp/test-output.txt
+## Your Mission
+[GOAL FROM USER OR "Discover and fix all issues in priority order"]
 
-# Python
-pytest --tb=no -q 2>&1 | grep -E "FAILED|ERROR"
+## Your Loop
 
-# Rust
-cargo test 2>&1 | grep -E "FAILED|error\[E"
+Execute this loop until goal achieved, blocked, or max cycles reached:
 
-# Go
-go test ./... 2>&1 | grep -E "FAIL|panic"
+```
+┌─────────────────────────────────────────┐
+│            PLANNING CYCLE               │
+├─────────────────────────────────────────┤
+│  1. DISCOVER  - Find tasks from codebase│
+│  2. TRIAGE    - Prioritize by severity  │
+│  3. PLAN      - Assign to workstreams   │
+│  4. EXECUTE   - Spawn workers           │
+│  5. WAIT      - Monitor worker progress │
+│  6. JUDGE     - Evaluate results        │
+│  7. REPORT    - Update human (if due)   │
+│  8. DECIDE    - Continue/Stop/Pivot     │
+└─────────────────────────────────────────┘
 ```
 
-Parse failures into tasks:
-- Test crash/panic → **P0**
-- Test timeout → **P1**
-- Test assertion failure → **P2**
+## Configuration
+- **Max cycles**: [MAX_CYCLES or 10]
+- **Report every**: [REPORT_EVERY or 3] cycles
+- **Max workers per cycle**: [MAX_WORKERS or auto-detected based on RAM]
+- **System RAM**: [DETECTED_RAM]GB
+- **Stop on**: P0 issues resolved, no progress for 2 cycles, or human stop signal
 
-#### Source 2: Type/Lint Errors (P1-P2)
+## Coordination Documents
 
+Read these FIRST before any planning:
+```
+AGENTS.md                    # Workstream definitions, ownership
+docs/philosophy.md           # Development principles
+docs/triage.md               # Priority framework
+instructions/<ws>.md         # Per-workstream scope
+```
+
+## Phase 1: DISCOVER
+
+Find tasks from these sources (in priority order):
+
+### 1.1 Failing Tests (P0-P1)
+```bash
+# Detect project type and run appropriate test command
+if [[ -f "package.json" ]]; then
+  npm test 2>&1 | tee /tmp/test-output.txt
+  grep -E "FAIL|Error|failed" /tmp/test-output.txt
+elif [[ -f "Cargo.toml" ]]; then
+  cargo test 2>&1 | grep -E "FAILED|error\[E"
+elif [[ -f "pyproject.toml" ]] || [[ -f "setup.py" ]]; then
+  pytest --tb=no -q 2>&1 | grep -E "FAILED|ERROR"
+fi
+```
+
+### 1.2 Type/Lint Errors (P1-P2)
 ```bash
 # TypeScript
-npx tsc --noEmit 2>&1 | head -50
-
-# ESLint
-npx eslint . --format compact 2>&1 | head -50
-
-# Rust
-cargo check 2>&1 | grep -E "^error"
+[[ -f "tsconfig.json" ]] && npx tsc --noEmit 2>&1 | head -30
 
 # Python
-mypy . 2>&1 | grep -E "error:"
+[[ -f "pyproject.toml" ]] && mypy . 2>&1 | grep -E "error:" | head -30
 ```
 
-#### Source 3: GitHub Issues (P2-P4)
-
+### 1.3 GitHub Issues (P2-P4)
 ```bash
-# Get open bugs
-gh issue list --label "bug" --state open --json number,title,labels
-
-# Get issues by priority label
-gh issue list --label "priority:high" --state open
-
-# Get issues assigned to workstream
-gh issue list --label "workstream:frontend" --state open
+gh issue list --label "bug" --state open --json number,title,labels 2>/dev/null | head -20
 ```
 
-#### Source 4: Code TODOs/FIXMEs (P3-P5)
-
+### 1.4 Code TODOs (P3-P5)
 ```bash
-# Find all TODOs with context
-grep -rn "TODO\|FIXME\|HACK\|XXX" src/ --include="*.ts" --include="*.tsx" | head -30
-
-# Categorize by urgency
-grep -rn "FIXME" src/   # → P3 (should fix)
-grep -rn "TODO" src/    # → P4 (nice to have)
-grep -rn "HACK" src/    # → P3 (technical debt)
+grep -rn "TODO\|FIXME\|HACK" src/ --include="*.ts" --include="*.py" --include="*.rs" 2>/dev/null | head -20
 ```
 
-#### Source 5: Missing Test Coverage (P3-P4)
-
-**Code Coverage Analysis:**
-
+### 1.5 Previous Progress
 ```bash
-# Node.js (nyc/istanbul)
-npx nyc --reporter=json npm test
-cat coverage/coverage-summary.json | jq '.total'
-
-# Find files with low coverage
-npx nyc --reporter=json npm test && \
-  cat coverage/coverage-final.json | jq -r 'to_entries[] | select(.value.s | to_entries | map(.value) | add / length < 0.5) | .key'
-
-# Python (coverage.py)
-coverage run -m pytest && coverage json
-cat coverage.json | jq '.files | to_entries[] | select(.value.summary.percent_covered < 50) | .key'
-
-# Rust (cargo-tarpaulin)
-cargo tarpaulin --out Json
-cat tarpaulin-report.json | jq '.files[] | select(.covered / .coverable < 0.5) | .path'
-```
-
-**Find Untested Public Functions:**
-
-```bash
-# TypeScript: Find exported functions without test files
-for f in $(find src -name "*.ts" ! -name "*.test.ts" ! -name "*.spec.ts"); do
-  base=$(basename "$f" .ts)
-  if ! ls src/**/${base}.test.ts src/**/${base}.spec.ts 2>/dev/null | grep -q .; then
-    echo "No tests: $f"
-  fi
-done
-
-# Find public functions in files with no corresponding test
-grep -l "^export " src/**/*.ts | while read f; do
-  test_file="${f%.ts}.test.ts"
-  if [[ ! -f "$test_file" ]]; then
-    echo "Missing test file: $test_file"
-    grep "^export function\|^export const\|^export class" "$f"
-  fi
-done
-```
-
-**Find Complex Functions Without Tests:**
-
-```bash
-# Use complexity analysis (requires tools like escomplex, radon, etc.)
-
-# JavaScript (escomplex)
-npx escomplex src/**/*.ts --format json | jq '.reports[] | select(.aggregate.cyclomatic > 10) | {file: .path, complexity: .aggregate.cyclomatic}'
-
-# Python (radon)
-radon cc src/ -j | jq '.[] | to_entries[] | select(.value[].complexity > 10)'
-
-# Then cross-reference with coverage to find complex untested code
-```
-
-**Find Changed Files Without Test Updates:**
-
-```bash
-# Files changed in last N commits without corresponding test changes
-git diff --name-only HEAD~10 -- "*.ts" "*.tsx" | while read f; do
-  test_file="${f%.ts}.test.ts"
-  if ! git diff --name-only HEAD~10 | grep -q "$test_file"; then
-    echo "Changed without test update: $f"
-  fi
-done
-```
-
-**Output Tasks for Missing Coverage:**
-
-```json
-{
-  "id": "task-coverage-001",
-  "priority": "P3",
-  "source": "coverage",
-  "title": "Add tests for UserService (32% coverage)",
-  "description": "Low coverage on critical service",
-  "file": "src/services/UserService.ts",
-  "workstream": "tests",
-  "suggested_tests": [
-    "createUser() - happy path",
-    "createUser() - duplicate email",
-    "deleteUser() - not found case"
-  ]
-}
-```
-
-#### Source 6: Edge Cases & Mutation Testing (Advanced)
-
-**Find Boundary Conditions Without Tests:**
-
-```bash
-# Look for numeric comparisons that might need edge case tests
-grep -rn "< \|> \|<= \|>= \|== 0\|=== 0" src/ --include="*.ts" | \
-  grep -v "test\|spec" | head -20
-
-# Find array/string operations (empty array edge cases)
-grep -rn "\.length\|\.slice\|\.map\|\.filter" src/ --include="*.ts" | \
-  grep -v "test\|spec" | head -20
-
-# Find null/undefined checks that might need testing
-grep -rn "!= null\|!== null\|!= undefined\|!== undefined\|\?\." src/ --include="*.ts" | \
-  grep -v "test\|spec" | head -20
-```
-
-**Mutation Testing (Find Weak Tests):**
-
-```bash
-# JavaScript (Stryker)
-npx stryker run --reporters json
-cat reports/mutation/mutation.json | jq '.files | to_entries[] | select(.value.mutants | map(select(.status == "Survived")) | length > 0)'
-
-# Python (mutmut)
-mutmut run && mutmut results
-mutmut show  # Shows surviving mutants = weak test coverage
-```
-
-Surviving mutants indicate:
-- Code that can be changed without breaking tests
-- Missing edge case coverage
-- Assertions that don't actually verify behavior
-
-**Generate Edge Case Tasks:**
-
-```json
-{
-  "id": "task-edge-001",
-  "priority": "P3",
-  "source": "mutation",
-  "title": "Add edge case tests for calculateDiscount()",
-  "description": "Mutant survived: changed '>' to '>=' on line 45",
-  "file": "src/pricing/calculateDiscount.ts:45",
-  "workstream": "tests",
-  "suggested_tests": [
-    "Test boundary: discount = 0",
-    "Test boundary: discount = maxDiscount",
-    "Test negative discount attempt"
-  ]
-}
-```
-
-#### Source 7: Progress Scoreboard (if exists)
-
-```bash
-# Find progress files (fastrender-style)
-ls progress/pages/*.json 2>/dev/null | head -20
-ls progress/*.json 2>/dev/null | head -20
-
-# Or check for a tasks file
 cat progress/tasks.json 2>/dev/null
-cat progress/backlog.md 2>/dev/null
+cat progress/status.json 2>/dev/null
 ```
 
-### Automatic Task File Generation
+## Phase 2: TRIAGE
 
-After discovering tasks, write them to `progress/tasks.json`:
+Categorize discovered tasks:
 
+| Priority | Category | Action |
+|----------|----------|--------|
+| **P0** | Crashes/Panics | Fix immediately, single focus |
+| **P1** | Test failures, type errors | Fix before new work |
+| **P2** | Major bugs | Schedule for this cycle |
+| **P3** | Minor issues | Schedule if capacity |
+| **P4+** | Enhancements | Backlog |
+
+**Critical Rule**: Group by root cause, not by symptom.
+> "If 5 tests fail due to one broken function, that's 1 task, not 5."
+
+## Phase 3: PLAN
+
+For each workstream with pending tasks:
+
+1. Read `instructions/<workstream>.md` for scope
+2. Match tasks to workstream ownership
+3. Create specific, measurable task assignments
+
+Write plan to `progress/current_plan.json`:
 ```json
 {
-  "generated_at": "2024-01-20T10:00:00Z",
+  "cycle": 1,
+  "timestamp": "2024-01-20T10:00:00Z",
+  "goal": "[GOAL]",
   "tasks": [
     {
       "id": "task-001",
       "priority": "P0",
-      "source": "test",
-      "title": "Fix auth.test.ts crash",
-      "description": "TypeError: Cannot read property 'user' of undefined",
-      "file": "src/auth/auth.test.ts:45",
-      "workstream": "backend"
-    },
-    {
-      "id": "task-002",
-      "priority": "P1",
-      "source": "typescript",
-      "title": "Fix type error in UserService",
-      "description": "Property 'email' does not exist on type 'User'",
-      "file": "src/services/UserService.ts:23",
-      "workstream": "backend"
-    },
-    {
-      "id": "task-003",
-      "priority": "P2",
-      "source": "github",
-      "title": "Login button unresponsive on mobile",
-      "description": "GitHub Issue #45",
-      "url": "https://github.com/user/repo/issues/45",
-      "workstream": "frontend"
+      "workstream": "backend",
+      "title": "Fix auth crash",
+      "success_criteria": "auth.test.ts passes"
     }
   ]
 }
 ```
 
-### Task Discovery Command
+## Phase 4: EXECUTE
 
-When running `/agentbase triage` or `/agentbase status`, automatically:
+Spawn workers for top-priority tasks. Use multiple Task tool calls in ONE message for parallelism:
 
-1. Run test suite (with timeout)
-2. Run type checker
-3. Check GitHub issues (if `gh` available)
-4. Scan for TODOs
-5. Aggregate into prioritized task list
-6. Write to `progress/tasks.json`
-
-### Manual Task Addition
-
-Users can also add tasks manually to `progress/backlog.md`:
-
-```markdown
-# Backlog
-
-## P1 - Must Fix
-- [ ] Fix memory leak in WebSocket handler (#backend)
-- [ ] Resolve race condition in cache invalidation (#backend)
-
-## P2 - Should Fix
-- [ ] Improve error messages for validation failures (#api)
-- [ ] Add loading states to dashboard (#frontend)
-
-## P3 - Nice to Have
-- [ ] Refactor auth middleware for clarity (#backend)
-- [ ] Add dark mode support (#frontend)
+```
+[Task 1: Worker for backend/P0 task]
+[Task 2: Worker for frontend/P1 task]
+[Task 3: Worker for api/P2 task]
 ```
 
-The `#workstream` tags route tasks to the correct workstream.
-
----
-
-## Step 3: Understand Current State
-
-### Read Progress/Task Files
-
-```bash
-# Check for tasks file
-cat progress/tasks.json 2>/dev/null | head -50
-
-# Or backlog
-cat progress/backlog.md 2>/dev/null
-
-# Or fastrender-style scoreboard
-ls progress/pages/*.json 2>/dev/null | head -20
-```
-
-### Categorize by Priority
-
-| Priority | Category | Sources |
-|----------|----------|---------|
-| **P0** | Crashes/Panics | Test crashes, runtime panics |
-| **P1** | Blocking | Test failures, type errors, lint errors |
-| **P2** | Major bugs | GitHub issues (bug label), assertion failures |
-| **P3** | Minor issues | FIXMEs, HAcKs, minor GitHub issues |
-| **P4** | Enhancements | TODOs, feature requests |
-| **P5** | Tech debt | Refactoring, documentation |
-
----
-
-## Step 3: Command Execution
-
-### `status` Command
-
-1. Read all progress JSON files
-2. Summarize by status category
-3. Show top failures per workstream
-4. Report overall health metrics
-
-Output format:
-```
-## AgentBase Status Report
-
-### Overview
-- Total pages: X
-- OK: Y (Z%)
-- Timeout: A
-- Panic: B
-- Error: C
-
-### By Workstream
-| Workstream | Assigned | Completed | Blocked |
-|------------|----------|-----------|---------|
-| ...        | ...      | ...       | ...     |
-
-### Top Priority Issues
-1. [P0] panic in layout/flex.rs (affects 3 pages)
-2. [P1] timeout in cascade (affects 5 pages)
-...
-```
-
-### `triage` Command
-
-1. Load failure classification from `docs/triage.md`
-2. Categorize all failures by hotspot
-3. Identify root causes that affect multiple pages
-4. Output prioritized task list
-
-**Critical Rule**: Do NOT assign "one worker per page". Split by failure class/hotspot:
-> "If 5 pages timeout in layout, assign one worker to fix the layout issue, not 5 workers to each page."
-
-### `plan [workstream]` Command
-
-1. Load workstream instructions from `instructions/<workstream>.md`
-2. Identify what the workstream OWNS vs DOES NOT own
-3. Find relevant failures within scope
-4. Create specific, measurable tasks
-
-Output format:
-```
-## Plan: [workstream]
-
-### Scope
-- Owns: [from instructions file]
-- Does NOT own: [from instructions file]
-
-### Tasks (Priority Order)
-1. [ ] Fix cascade timeout affecting amazon.com, ebay.com (P1)
-   - Evidence: stages_ms.cascade > 4000ms
-   - Success: Both pages render in < 5s
-
-2. [ ] Implement missing CSS property X (P2)
-   - Evidence: 12 pages show wrong layout
-   - Success: diff_percent improves on affected pages
-```
-
-### `work [workstream]` Command
-
-Spawn a worker sub-agent using the Task tool:
-
+**Worker spawn template:**
 ```
 <Task tool call>
 subagent_type: general-purpose
 prompt: |
-  You are a WORKER agent in the agentbase system.
+  # Worker Agent: [WORKSTREAM]
 
-  ## Your Workstream: [workstream]
-
-  ## Instructions
-  [Content from instructions/<workstream>.md]
+  You are a WORKER in the agentbase system. Execute your task completely.
 
   ## Your Task
-  [Specific task from plan]
+  [SPECIFIC TASK FROM PLAN]
+
+  ## Scope
+  **OWNS**: [from instructions file]
+  **DOES NOT OWN**: [from instructions file]
 
   ## Definition of Done
-  Your task is ONLY done if it produces:
-  - Page transitions timeout → render (status changes in progress JSON)
-  - Page gets materially faster (lower total_ms)
-  - Panic/crash eliminated (with regression test)
-  - Correctness fix (observable improvement)
+  - [ ] [SUCCESS CRITERIA FROM TASK]
+  - [ ] No new test failures
+  - [ ] No new type errors
 
-  If you cannot show a measurable delta, you are not done.
+  ## Rules
+  - No page/case-specific hacks
+  - No panics - return errors cleanly
+  - If blocked, document why and report back
 
-  ## Non-Negotiables
-  - No page-specific hacks
-  - No panics in production code
-  - Always use timeout -k with cargo commands
-  - Always use scripts/cargo_agent.sh wrapper
-
-  ## Resource Limits
-  timeout -k 10 600 bash scripts/cargo_agent.sh build --release
-  timeout -k 10 600 bash scripts/cargo_agent.sh test --quiet --lib
-
-  Work until done or blocked, then report back.
+  Work until done or blocked.
 </Task>
 ```
 
-### `parallel [n]` Command
+## Phase 5: WAIT
 
-1. Run triage to get prioritized tasks
-2. Spawn n workers IN PARALLEL using multiple Task tool calls in a single message
-3. Each worker gets a different task from the priority queue
-4. Use `run_in_background: true` for true parallelism
+Monitor spawned workers:
+- Check for completion
+- Collect results
+- Note any blockers reported
 
-Example for n=3:
+## Phase 6: JUDGE
+
+Evaluate the cycle:
+
+```bash
+# Check test status
+npm test 2>&1 | grep -E "passed|failed" | tail -5
+
+# Check for new errors
+npx tsc --noEmit 2>&1 | wc -l
+
+# Compare to previous state
+git diff --stat HEAD~1
 ```
-[Task 1: Worker for P0 panic fix]
-[Task 2: Worker for P1 timeout fix]
-[Task 3: Worker for P2 accuracy fix]
+
+**Decision matrix:**
+
+| Condition | Decision |
+|-----------|----------|
+| Tasks completed, more remain | **CONTINUE** |
+| All P0-P2 tasks done | **GOAL ACHIEVED** → Stop |
+| No progress for 2 cycles | **STALLED** → Report to human, stop |
+| Worker reported blocker | **BLOCKED** → Report to human, stop |
+| Human sent stop signal | **STOPPED** → Report final status |
+
+## Phase 7: REPORT
+
+Every [REPORT_EVERY] cycles, write a status report:
+
+**Write to `progress/reports/cycle-N.md`:**
+```markdown
+# Agent Planner Report: Cycle [N]
+
+## Summary
+- Cycle: [N] of [MAX]
+- Status: [CONTINUING | BLOCKED | COMPLETE]
+- Tasks completed this cycle: [X]
+- Tasks remaining: [Y]
+
+## Progress
+- [x] Fixed auth crash (P0)
+- [x] Resolved type errors in UserService (P1)
+- [ ] Login button bug (P2) - in progress
+
+## Blockers
+[None | Description of blockers]
+
+## Next Cycle Plan
+[What will be attempted next]
+
+## Metrics
+- Tests passing: X/Y
+- Type errors: Z
+- Time elapsed: T
 ```
 
-### `judge` Command
+**Also output to console** so human sees it.
 
-Evaluate progress since last checkpoint:
+## Phase 8: DECIDE
 
-1. Read progress JSON files
-2. Compare to previous state (via git diff or cached baseline)
-3. Calculate metrics:
-   - Pages fixed (timeout → ok)
-   - Pages regressed (ok → timeout/panic)
-   - Accuracy improvements
-   - Accuracy regressions
+Based on Judge evaluation:
 
-4. Decision:
-   - **CONTINUE**: Progress being made, work remains
-   - **STOP**: No progress in N iterations, need human input
-   - **PIVOT**: Current approach not working, try different strategy
+- **CONTINUE**: Increment cycle, go to Phase 1
+- **GOAL ACHIEVED**: Write final report, exit with success
+- **STALLED**: Write report explaining lack of progress, exit
+- **BLOCKED**: Write report with blocker details, exit
+- **STOPPED**: Write final status, exit
+
+## State Files
+
+Maintain these files for persistence:
+
+```
+progress/
+├── status.json          # Overall status
+├── tasks.json           # Discovered tasks
+├── current_plan.json    # Active plan
+└── reports/
+    ├── cycle-1.md
+    ├── cycle-2.md
+    └── ...
+```
+
+## Non-Negotiables
+
+1. **Always read coordination docs first** - They define the rules
+2. **Never work outside workstream scope** - Respect ownership boundaries
+3. **Measurable outcomes only** - "If you can't show a delta, you're not done"
+4. **Report blockers immediately** - Don't spin on unsolvable problems
+5. **Commit progress to git** - State must survive restarts
+
+## Stop Conditions
+
+Stop the loop if ANY of these occur:
+- Goal explicitly achieved
+- Max cycles reached
+- No progress for 2 consecutive cycles
+- Worker reports unresolvable blocker
+- Human signals stop (check for `progress/.stop` file)
+
+When stopping, ALWAYS write a final report.
+```
+
+---
+
+## The `goals` Command
+
+### View Current Goals
+
+```
+/agentbase goals
+```
 
 Output:
 ```
-## Judge Evaluation
+## AgentBase Goals
 
-### Progress Since Last Checkpoint
-- Fixed: 3 pages (timeout → ok)
-- Regressed: 0 pages
-- Accuracy improved: 5 pages (avg -2.3% diff)
+Current goals (from progress/goals.json):
 
-### Assessment
-[CONTINUE] Making steady progress. Recommend continuing with layout workstream.
+1. [P0] Fix all crashing tests
+2. [P1] Resolve TypeScript errors
+3. [P2] Complete authentication feature
 
-### Next Priorities
-1. Continue P1 timeout fixes (2 remaining)
-2. Start P2 accuracy work on cascade
+Set new goals:
+  /agentbase goals set "your goal here"
+  /agentbase goals add "additional goal"
+  /agentbase goals clear
 ```
 
-### `init` Command
+### Set Goals
 
-**This is the most important command for new repos.** It analyzes your codebase and generates the scaffolding.
-
-#### Step 1: Analyze the Repository
-
-Use Glob and Grep to understand the codebase structure:
-
-```bash
-# Find project configuration files
-ls -la *.json *.toml *.yaml Cargo.toml package.json pyproject.toml 2>/dev/null
-
-# Find source directories
-find . -type d -name "src" -o -name "lib" -o -name "app" -o -name "packages" 2>/dev/null | head -20
-
-# Find test directories
-find . -type d -name "test" -o -name "tests" -o -name "__tests__" -o -name "spec" 2>/dev/null | head -10
-
-# Check for existing docs
-ls -la docs/ README.md CONTRIBUTING.md 2>/dev/null
+```
+/agentbase goals set "Fix all P0 and P1 issues"
 ```
 
-#### Step 2: Detect Technology Stack
-
-Based on files found:
-- `Cargo.toml` → Rust project
-- `package.json` → Node.js/JavaScript
-- `pyproject.toml` / `setup.py` → Python
-- `go.mod` → Go
-- `src-tauri/` → Tauri desktop app
-- `functions/` → Cloud functions
-
-#### Step 3: Propose Workstreams
-
-Based on directory structure, propose 3-6 workstreams. Examples:
-
-| Project Type | Typical Workstreams |
-|--------------|---------------------|
-| Full-stack web | `frontend`, `backend`, `database`, `api` |
-| CLI tool | `core`, `cli`, `config`, `tests` |
-| Library | `core`, `api`, `docs`, `examples` |
-| Desktop app | `ui`, `backend`, `platform`, `data` |
-| Monorepo | One workstream per package |
-
-**Ask the user to confirm or modify the proposed workstreams before generating.**
-
-#### Step 4: Generate Scaffolding
-
-Create the following files:
-
-**`AGENTS.md`** (use template from `templates/AGENTS.template.md`):
-- Fill in project name
-- List detected workstreams with ownership tables
-- Add appropriate non-negotiables for the tech stack
-
-**`docs/philosophy.md`**:
-```markdown
-# [Project] Philosophy
-
-## The Product
-[What this project delivers - ask user if unclear]
-
-## Core Principles
-1. **[Primary goal]** is the product
-2. **90/10 rule**: 90% core functionality, 10% infrastructure
-3. **Measurable outcomes**: If you can't show a delta, you're not done
-4. **No hacks**: Correct > fast, incomplete > wrong
-
-## What Counts
-- New capability with regression test
-- Bugfix with regression test
-- Crash/error eliminated with regression test
-
-## What Does NOT Count
-- Refactoring without behavioral change
-- Tooling work not immediately used
-- Documentation not blocking a fix
-```
-
-**`docs/triage.md`**:
-```markdown
-# Triage & Priorities
-
-## Priority Order
-| Priority | Category | Description |
-|----------|----------|-------------|
-| **P0** | Crashes | Application crashes, panics, exceptions |
-| **P1** | Blocking bugs | Features completely broken |
-| **P2** | Major bugs | Features partially broken |
-| **P3** | Minor bugs | Edge cases, cosmetic issues |
-| **P4** | Enhancements | New features, improvements |
-| **P5** | Tech debt | Refactoring, cleanup |
-
-## Definition of Done
-A task is done when:
-- [ ] The fix/feature works as expected
-- [ ] Tests pass (existing + new regression)
-- [ ] No new warnings/errors introduced
-```
-
-**`instructions/<workstream>.md`** for each workstream:
-```markdown
-# [Workstream Name] (`workstream_id`)
-
-## Owns
-- [Directory or feature 1]
-- [Directory or feature 2]
-
-## Does NOT own
-- [Out of scope 1]
-- [Out of scope 2]
-
-## Key Files
-- `path/to/main/code/`
-- `path/to/tests/`
-
-## Definition of Done
-- [ ] Feature works
-- [ ] Tests added
-- [ ] No regressions
-```
-
-**`progress/status.json`**:
+Writes to `progress/goals.json`:
 ```json
 {
-  "initialized": "2024-01-20T00:00:00Z",
-  "workstreams": {
-    "workstream_1": { "status": "active", "tasks_completed": 0 },
-    "workstream_2": { "status": "active", "tasks_completed": 0 }
-  }
+  "updated_at": "2024-01-20T10:00:00Z",
+  "goals": [
+    {
+      "id": "goal-001",
+      "priority": "P0",
+      "description": "Fix all P0 and P1 issues",
+      "status": "active"
+    }
+  ]
 }
 ```
 
-#### Step 5: Confirm and Write
-
-Show the user what will be created:
-
-```
-## AgentBase Init Preview
-
-Will create:
-  AGENTS.md                    (master coordination)
-  docs/philosophy.md           (development principles)
-  docs/triage.md               (priority framework)
-  instructions/frontend.md     (workstream scope)
-  instructions/backend.md      (workstream scope)
-  instructions/api.md          (workstream scope)
-  progress/status.json         (initial scoreboard)
-
-Detected workstreams:
-  1. frontend - React components, hooks, UI
-  2. backend - Server logic, database
-  3. api - REST endpoints, validation
-
-Proceed? [Y/n]
-```
-
-Use the Write tool to create all files after confirmation
-
 ---
 
-### `setup` Command (Recommended for Existing Repos)
+## The `stop` Command
 
-**Use this to experiment without touching your main codebase.**
-
-This creates an isolated worktree where all agentbase scaffolding lives, leaving your main branch pristine.
-
-#### How Git Worktrees Work
+Signal the Agent Planner to stop gracefully:
 
 ```
-your-project/                    ← Main working directory (untouched)
-├── src/
-├── package.json
-└── .git/
-
-your-project-agentbase/          ← Worktree (isolated branch)
-├── src/                         ← Same code, different branch
-├── package.json
-├── AGENTS.md                    ← NEW: scaffolding lives here
-├── docs/philosophy.md           ← NEW
-├── docs/triage.md               ← NEW
-├── instructions/                ← NEW
-└── progress/                    ← NEW
+/agentbase stop
 ```
 
-#### Step 1: Create the Worktree
+This creates `progress/.stop` file. The Agent Planner checks for this file each cycle and stops gracefully if found.
 
 ```bash
-# From within the repo
-cd /path/to/your-project
-
-# Create a new branch and worktree in one command
-git worktree add ../your-project-agentbase -b agentbase-setup
-
-# Or if you want it as a sibling directory with custom name
-git worktree add ../your-project-agents -b agentbase/main
-```
-
-#### Step 2: Initialize in the Worktree
-
-```bash
-# Move to the worktree
-cd ../your-project-agentbase
-
-# Start claude and init
-claude
-# Then: /agentbase init
-```
-
-#### Step 3: Work in Isolation
-
-All changes happen in the worktree branch. Your main branch stays clean.
-
-```bash
-# In worktree: make changes, test scaffolding
-git add AGENTS.md docs/ instructions/ progress/
-git commit -m "Add agentbase scaffolding"
-
-# When ready to merge (from main repo):
-cd ../your-project
-git merge agentbase-setup
-
-# Or cherry-pick specific files:
-git checkout agentbase-setup -- AGENTS.md docs/ instructions/
-```
-
-#### Step 4: Clean Up (Optional)
-
-```bash
-# Remove worktree when done experimenting
-git worktree remove ../your-project-agentbase
-
-# Or keep it for ongoing parallel work
-```
-
-**Output for `/agentbase setup`:**
-
-```
-## AgentBase Setup: Isolated Worktree
-
-Current repo: /path/to/your-project (branch: main)
-
-This will create:
-  Worktree: /path/to/your-project-agentbase
-  Branch: agentbase-setup
-
-Your main branch will NOT be modified.
-
-Commands to run:
-  git worktree add ../your-project-agentbase -b agentbase-setup
-  cd ../your-project-agentbase
-  claude
-  # Then: /agentbase init
-
-Proceed with worktree creation? [Y/n]
-```
-
-If user confirms, run the git worktree command via Bash tool.
-
----
-
-### `worktree [workstream]` Command
-
-**For true parallel isolation: one worktree per workstream.**
-
-This is the ultimate scaling pattern - each workstream gets its own:
-- Working directory
-- Branch
-- Claude session
-
-#### The Pattern
-
-```
-your-project/                    ← Main (read-only reference)
-your-project-frontend/           ← Worktree: frontend workstream
-your-project-backend/            ← Worktree: backend workstream
-your-project-api/                ← Worktree: api workstream
-```
-
-#### Create Workstream Worktree
-
-```bash
-# Create worktree for a specific workstream
-git worktree add ../your-project-frontend -b agentbase/frontend
-
-# Each worktree branches from the same base
-git worktree add ../your-project-backend -b agentbase/backend
-git worktree add ../your-project-api -b agentbase/api
-```
-
-#### Run Parallel Workers
-
-```bash
-# Terminal 1: Frontend worker
-cd ../your-project-frontend
-claude --print "/agentbase work frontend"
-
-# Terminal 2: Backend worker
-cd ../your-project-backend
-claude --print "/agentbase work backend"
-
-# Terminal 3: API worker
-cd ../your-project-api
-claude --print "/agentbase work api"
-```
-
-#### Merge Strategy
-
-When workstreams complete:
-
-```bash
-# From main repo
-cd your-project
-
-# Merge each workstream (they don't conflict if scopes are correct)
-git merge agentbase/frontend
-git merge agentbase/backend
-git merge agentbase/api
-
-# Or rebase for cleaner history
-git rebase agentbase/frontend
-```
-
-#### Why This Works
-
-1. **No merge conflicts during work** - Each workstream owns different files
-2. **True parallelism** - Separate processes, separate directories
-3. **Easy rollback** - Just delete the worktree/branch
-4. **Clean history** - Merge only validated changes
-
-**Output for `/agentbase worktree frontend`:**
-
-```
-## AgentBase Worktree: frontend
-
-Creating isolated worktree for frontend workstream...
-
-Worktree: /path/to/your-project-frontend
-Branch: agentbase/frontend
-Scope: src/components/, src/hooks/, UI (from instructions/frontend.md)
-
-Commands:
-  git worktree add ../your-project-frontend -b agentbase/frontend
-  cd ../your-project-frontend
-  claude --print "/agentbase work frontend"
-
-This workstream OWNS:
-  - src/components/
-  - src/hooks/
-  - src/styles/
-
-This workstream does NOT touch:
-  - src/server/
-  - src/api/
-  - database/
-
-Proceed? [Y/n]
+touch progress/.stop
+echo "Stop signal sent. Agent Planner will stop after current cycle."
 ```
 
 ---
 
-## Recommended Workflow for Existing Codebases
+## The `status` Command
+
+Show current state without starting the planner:
 
 ```
-1. SETUP (create isolated environment)
-   /agentbase setup
-   → Creates worktree, keeps main clean
+/agentbase status
+```
 
-2. INIT (in worktree)
-   /agentbase init
-   → Generates scaffolding in the worktree branch
+1. Read `progress/status.json`, `progress/tasks.json`, `progress/current_plan.json`
+2. Read latest report from `progress/reports/`
+3. Output summary:
 
-3. TEST (validate the approach)
-   /agentbase status
-   /agentbase work <workstream>
-   → Make sure it works before touching main
+```
+## AgentBase Status
 
-4. SCALE (optional: one worktree per workstream)
-   /agentbase worktree frontend
-   /agentbase worktree backend
-   → True parallel isolation
+### Agent Planner
+- Status: [Running cycle 3 | Idle | Stopped]
+- Last report: 2024-01-20 10:30:00
 
-5. MERGE (when validated)
-   git merge agentbase-setup
-   → Bring scaffolding into main only when ready
+### Goals
+1. Fix all P0 and P1 issues (active)
+
+### Tasks
+| Priority | Total | Done | In Progress | Blocked |
+|----------|-------|------|-------------|---------|
+| P0       | 2     | 1    | 1           | 0       |
+| P1       | 5     | 3    | 2           | 0       |
+| P2       | 8     | 2    | 0           | 1       |
+
+### Workstreams
+| Workstream | Assigned | Completed | Active |
+|------------|----------|-----------|--------|
+| backend    | 5        | 3         | 2      |
+| frontend   | 4        | 2         | 0      |
+| api        | 3        | 1         | 1      |
+
+### Recent Activity
+- [10:30] Completed: Fix auth crash (backend)
+- [10:25] Started: Resolve type errors (backend)
+- [10:20] Completed: Fix login button (frontend)
 ```
 
 ---
 
-## Worker Prompt Template
+## Manual Mode Commands
 
-When spawning workers, use this template:
+These commands let you run individual phases without the autonomous loop:
 
-```markdown
-# Worker Agent: [WORKSTREAM]
+### `triage` - Manual task discovery and prioritization
 
-You are a WORKER in the agentbase multi-agent system.
-
-## Role
-- Execute assigned tasks completely
-- Do NOT coordinate with other workers
-- Do NOT worry about the big picture
-- Grind on your task until done, then report back
-
-## Your Assignment
-[SPECIFIC TASK]
-
-## Scope (from instructions/[workstream].md)
-**OWNS**: [list]
-**DOES NOT OWN**: [list]
-
-## Definition of Done
-Your task is ONLY done if you can show a measurable delta:
-- [ ] Test passes that previously failed
-- [ ] Page renders that previously timed out
-- [ ] Panic eliminated with regression test
-- [ ] Accuracy improved (diff_percent decreased)
-
-## Constraints
-1. No page-specific hacks (no hostname checks, no magic numbers)
-2. No panics - return errors cleanly
-3. Spec-first: incomplete but correct > complete but wrong
-4. Always use resource limits on commands
-
-## When Blocked
-If you cannot complete the task:
-1. Document what you tried
-2. Document what's blocking you
-3. Suggest how to unblock
-4. Report back to planner
-
-Do not spin on a problem indefinitely.
 ```
+/agentbase triage
+```
+
+Runs discovery and outputs prioritized task list without spawning workers.
+
+### `plan [workstream]` - Manual planning for one workstream
+
+```
+/agentbase plan backend
+```
+
+Creates a plan for the specified workstream without executing.
+
+### `work [workstream]` - Spawn a single worker
+
+```
+/agentbase work backend
+```
+
+Spawns one worker for the top task in the specified workstream.
+
+### `parallel [n]` - Spawn multiple workers
+
+```
+/agentbase parallel 3
+```
+
+Spawns n workers across top-priority tasks.
+
+### `judge` - Manual progress evaluation
+
+```
+/agentbase judge
+```
+
+Evaluates current progress and outputs recommendation.
+
+---
+
+## The `init` Command
+
+Initialize scaffolding for a new repo. See detailed instructions in the scaffolding section below.
+
+---
+
+## Scaffolding Generation (`init`)
+
+### Step 1: Analyze Repository
+
+```bash
+ls -la *.json *.toml *.yaml Cargo.toml package.json pyproject.toml 2>/dev/null
+find . -type d -name "src" -o -name "lib" -o -name "app" 2>/dev/null | head -10
+```
+
+### Step 2: Detect Stack
+
+| File | Stack |
+|------|-------|
+| `package.json` | Node.js |
+| `Cargo.toml` | Rust |
+| `pyproject.toml` | Python |
+| `go.mod` | Go |
+
+### Step 3: Propose Workstreams
+
+Based on structure, propose 3-6 workstreams. Ask user to confirm.
+
+### Step 4: Generate Files
+
+Create:
+- `AGENTS.md` - Master coordination
+- `docs/philosophy.md` - Principles
+- `docs/triage.md` - Priorities
+- `instructions/<ws>.md` - Per workstream
+- `progress/status.json` - Initial state
+- `progress/goals.json` - Empty goals
+
+### Step 5: Confirm and Write
+
+Show preview, get user confirmation, then write files.
+
+---
+
+## Worktree Commands
+
+### `setup` - Create isolated worktree
+
+```
+/agentbase setup
+```
+
+Creates `../project-agentbase/` worktree for experimentation.
+
+### `worktree [workstream]` - Per-workstream isolation
+
+```
+/agentbase worktree frontend
+```
+
+Creates `../project-frontend/` with dedicated branch.
 
 ---
 
 ## Multi-Session Scaling
 
-For true parallel scaling beyond sub-agents, use multiple Claude Code sessions:
+For true parallelism beyond sub-agents:
 
 ```bash
-#!/bin/bash
-# multi-session.sh - Run multiple agentbase sessions in parallel
-
-WORKSTREAMS=("capability_buildout" "pageset_page_loop" "js_engine" "browser_chrome")
-
-for ws in "${WORKSTREAMS[@]}"; do
-  echo "Starting worker for $ws..."
-  claude --print "use agentbase work $ws" &
-done
-
-wait
-echo "All workers completed"
+# Use the included script
+./skill/scripts/multi-session.sh --worktrees --tmux
 ```
 
-Or use tmux/screen for interactive monitoring:
-
-```bash
-tmux new-session -d -s agentbase
-for ws in "${WORKSTREAMS[@]}"; do
-  tmux new-window -t agentbase -n "$ws" "claude --print 'use agentbase work $ws'"
-done
-tmux attach -t agentbase
-```
+This creates separate Claude sessions per workstream, each with its own worktree.
 
 ---
 
-## Key Principles (from research)
+## Key Principles
 
-1. **Role Separation**: You are the Planner. Workers execute. Judge evaluates.
-2. **Non-Overlapping Ownership**: Each workstream has explicit owns/does-not-own.
-3. **Measurable Outcomes**: "If you can't show a measurable delta, you are not done."
-4. **Resource Safety**: Always use timeouts and memory limits.
-5. **Committed Scoreboard**: Progress tracked in git via JSON files.
-6. **Simplicity**: Remove complexity rather than add it.
-7. **Prompts > Architecture**: These instructions ARE the coordination mechanism.
+1. **Human is Master Orchestrator** - Sets goals, reviews, intervenes
+2. **Agent Planner is Autonomous** - Runs the loop without constant human input
+3. **Workers are Focused** - Execute single tasks, don't coordinate
+4. **Judge is Objective** - Measurable progress or stop
+5. **Prompts > Infrastructure** - This file IS the system
+6. **Simplicity Wins** - Remove complexity, don't add it
 
 ---
 
 ## Example Session
 
 ```
+User: /agentbase init
+AgentBase: [analyzes repo, generates scaffolding]
+
+User: /agentbase goals set "Fix all failing tests and type errors"
+AgentBase: [writes goals to progress/goals.json]
+
+User: /agentbase go
+AgentBase: [spawns Agent Planner, shows initial status]
+
+... Agent Planner runs autonomously ...
+
+AgentBase:
+## Agent Planner Report: Cycle 3
+
+### Summary
+- Status: CONTINUING
+- Tasks completed: 5
+- Tasks remaining: 3
+
+### Progress
+- [x] Fixed auth crash (P0)
+- [x] Fixed 3 type errors (P1)
+- [x] Fixed login test (P1)
+- [ ] API validation (P2) - in progress
+
+### Next
+Continuing with P2 tasks...
+
+... more cycles ...
+
 User: /agentbase status
+AgentBase: [shows current state]
 
-AgentBase: [reads progress files, outputs status report]
-
-User: /agentbase triage
-
-AgentBase: [categorizes failures, outputs prioritized task list]
-
-User: /agentbase parallel 3
-
-AgentBase: [spawns 3 worker sub-agents in parallel on top priorities]
-
-User: /agentbase judge
-
-AgentBase: [evaluates progress, recommends next action]
+User: /agentbase stop
+AgentBase: [signals planner to stop, planner writes final report]
 ```
