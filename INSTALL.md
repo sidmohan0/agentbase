@@ -4,11 +4,13 @@
 
 - [Claude Code](https://claude.ai/claude-code) CLI installed and authenticated
 - Git (for worktree features)
-- Bash (for multi-session script)
+- Bash shell:
+  - **macOS/Linux**: Built-in
+  - **Windows**: Use [Git Bash](https://git-scm.com/downloads) (included with Git for Windows). Native CMD/PowerShell is not supported.
 
 Optional:
 - GitHub CLI (`gh`) for issue integration
-- `tmux` for multi-session monitoring
+- `tmux` for multi-session monitoring (macOS/Linux only)
 
 ## Installation Methods
 

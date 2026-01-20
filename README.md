@@ -34,6 +34,12 @@ AgentBase turns Claude Code into a hierarchical multi-agent system where **you**
 
 Workers operate on isolated **workstreams** (e.g., `frontend`, `backend`, `api`) with non-overlapping ownership, enabling true parallel development.
 
+## Requirements
+
+- **macOS** or **Linux**: Works out of the box
+- **Windows**: Requires [Git Bash](https://git-scm.com/downloads) (included with Git for Windows). Native CMD/PowerShell is not supported.
+- **Claude Code**: The CLI must be installed and configured
+
 ## Quick Start
 
 ```bash
@@ -186,7 +192,7 @@ See [INSTALL.md](INSTALL.md) for more update options.
 
 ## Version
 
-Current version: **1.1.0**
+Current version: **1.2.0**
 
 Check your installed version:
 ```bash

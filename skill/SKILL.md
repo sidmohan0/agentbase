@@ -13,11 +13,10 @@ You are the **interface layer** between a human orchestrator and an autonomous A
 
 ## Platform Requirements
 
-> **This skill requires macOS or Linux.** Windows is not supported due to:
-> - Unix-specific memory detection (`sysctl`, `/proc/meminfo`)
-> - Bash shell syntax throughout
-> - Unix temp file paths (`/tmp/`)
-> - Git worktree behavior differences
+> **Supported platforms:** macOS, Linux, and Windows (via Git Bash/MSYS2).
+>
+> **Windows users:** Requires Git Bash (included with Git for Windows). Native CMD/PowerShell is not supported.
+> Git Bash provides the necessary Unix-like environment including bash, /proc/meminfo, and /tmp paths.
 
 ---
 
@@ -77,6 +76,7 @@ Parse `$ARGUMENTS` to determine the command:
 
 | Command | Description |
 |---------|-------------|
+| `help` | Show available commands and usage |
 | `go [goal]` | **Launch autonomous Agent Planner** with optional goal |
 | `goals` | View/set high-level goals for the Agent Planner |
 | `status` | Show current state across all workstreams |
@@ -93,6 +93,67 @@ Parse `$ARGUMENTS` to determine the command:
 | `setup` | Create isolated worktree for experimentation |
 | `worktree [workstream]` | Create a worktree for a specific workstream |
 
+### Command Parsing
+
+```bash
+COMMAND="${1:-help}"  # Default to help if no command given
+shift 2>/dev/null || true
+
+case "$COMMAND" in
+  help|--help|-h)
+    # Show help (see help section below)
+    ;;
+  go|goals|status|stop|resume|cleanup|triage|plan|work|parallel|judge|init|discover|setup|worktree)
+    # Valid command, continue processing
+    ;;
+  *)
+    echo "## AgentBase: Unknown Command"
+    echo ""
+    echo "Unknown command: '$COMMAND'"
+    echo ""
+    echo "Run '/agentbase help' to see available commands."
+    exit 1
+    ;;
+esac
+```
+
+---
+
+## The `help` Command
+
+When `/agentbase` is run with no arguments, `help`, `--help`, or `-h`:
+
+```
+## AgentBase: Multi-Agent Orchestration
+
+Usage: /agentbase <command> [args]
+
+**Getting Started:**
+  init                 Initialize scaffolding in a new repo
+  goals set "..."      Set high-level goals
+  go [goal]            Launch autonomous Agent Planner
+
+**Monitoring & Control:**
+  status               Check current state and progress
+  stop                 Signal graceful shutdown
+  resume               Resume from last saved state
+  cleanup              Remove old state files
+
+**Manual Mode:**
+  discover             Scan codebase for tasks
+  triage               Analyze and prioritize tasks
+  plan <workstream>    Create plan for a workstream
+  work <workstream>    Spawn a single worker
+  parallel <n>         Spawn n workers (1-8)
+  judge                Evaluate progress
+
+**Worktrees:**
+  setup                Create isolated worktree
+  worktree <ws>        Create workstream-specific worktree
+
+Run '/agentbase <command>' to execute a command.
+```
+
 ---
 
 ## Step 0: Pre-Flight Checks (ALWAYS DO THIS FIRST)
@@ -102,8 +163,18 @@ Before ANY command, run these checks:
 ### 0.1 Platform Check
 
 ```bash
-if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
-  echo "ERROR: AgentBase requires macOS or Linux. Windows is not supported."
+# Supported: darwin (macOS), linux-gnu (Linux), msys (Git Bash), cygwin
+# Not supported: win32 (native Windows CMD/PowerShell)
+if [[ "$OSTYPE" == "win32" ]]; then
+  echo "ERROR: AgentBase requires a Unix-like shell."
+  echo "On Windows, please use Git Bash (included with Git for Windows)."
+  echo "Native CMD and PowerShell are not supported."
+  exit 1
+fi
+
+# Verify we have bash features we need
+if [[ -z "$BASH_VERSION" ]]; then
+  echo "ERROR: AgentBase requires bash. Current shell: $SHELL"
   exit 1
 fi
 ```
@@ -189,13 +260,30 @@ Run `/agentbase init` to analyze this repo and generate the scaffolding.
 ```bash
 LOCK_FILE="progress/.lock"
 if [[ -f "$LOCK_FILE" ]]; then
-  LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
-  LOCK_TIME=$(stat -f %Sm -t "%Y-%m-%d %H:%M" "$LOCK_FILE" 2>/dev/null || stat -c %y "$LOCK_FILE" 2>/dev/null | cut -d. -f1)
+  LOCK_PID=$(head -1 "$LOCK_FILE" 2>/dev/null)
+  # Cross-platform stat: try GNU stat first (Linux/MSYS), then BSD stat (macOS)
+  LOCK_TIME=$(stat -c '%y' "$LOCK_FILE" 2>/dev/null | cut -d. -f1 || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$LOCK_FILE" 2>/dev/null)
+
+  # Check staleness: lock older than 4 hours is likely stale
+  LOCK_AGE_SECONDS=$(( $(date +%s) - $(stat -c '%Y' "$LOCK_FILE" 2>/dev/null || stat -f '%m' "$LOCK_FILE" 2>/dev/null) ))
+  LOCK_AGE_HOURS=$(( LOCK_AGE_SECONDS / 3600 ))
+  IS_STALE=false
+  if [[ $LOCK_AGE_HOURS -ge 4 ]]; then
+    IS_STALE=true
+  fi
 
   echo "## AgentBase: Already Running"
   echo ""
   echo "An Agent Planner appears to be running (lock file exists)."
   echo "  Lock created: $LOCK_TIME"
+  echo "  Lock age: ${LOCK_AGE_HOURS}h $((LOCK_AGE_SECONDS % 3600 / 60))m"
+
+  if [[ "$IS_STALE" == "true" ]]; then
+    echo ""
+    echo "  ⚠️  This lock is over 4 hours old and may be stale."
+    echo "  If the agent crashed, run '/agentbase cleanup' to remove it."
+  fi
+
   echo ""
   echo "Options:"
   echo "  /agentbase status   - Check current progress"
@@ -307,10 +395,21 @@ Before spawning the Agent Planner, detect available system memory:
 
 ```bash
 # Detect OS and get memory
+# Works on: macOS, Linux, MSYS2/Git Bash (Windows)
 if [[ "$OSTYPE" == "darwin"* ]]; then
   TOTAL_MEM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
 elif [[ -f /proc/meminfo ]]; then
+  # Works on Linux AND MSYS2/Git Bash on Windows
   TOTAL_MEM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
+elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+  # Fallback: Use PowerShell if /proc/meminfo unavailable
+  MEM_BYTES=$(powershell -Command "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory" 2>/dev/null)
+  if [[ -n "$MEM_BYTES" ]]; then
+    TOTAL_MEM_GB=$(( MEM_BYTES / 1024 / 1024 / 1024 ))
+  else
+    echo "WARNING: Could not detect system memory. Using default of 2 workers."
+    TOTAL_MEM_GB=8
+  fi
 else
   echo "WARNING: Could not detect system memory. Using default of 2 workers."
   TOTAL_MEM_GB=8
@@ -789,8 +888,28 @@ Signal the Agent Planner to stop gracefully:
 ```
 
 ```bash
+# Check if agent is actually running
+if [[ ! -f "progress/.lock" ]]; then
+  echo "## AgentBase: Not Running"
+  echo ""
+  echo "No Agent Planner is currently running (no lock file found)."
+  echo ""
+  echo "Use '/agentbase go' to start the Agent Planner."
+  exit 0
+fi
+
+# Check if stop signal already exists
+if [[ -f "progress/.stop" ]]; then
+  echo "## AgentBase: Stop Already Signaled"
+  echo ""
+  echo "A stop signal has already been sent."
+  echo "The Agent Planner will stop after completing its current cycle."
+  echo ""
+  echo "Use '/agentbase status' to check if the agent has stopped."
+  exit 0
+fi
+
 mkdir -p progress
-touch progress/.stop
 echo "$(date -Iseconds)" > progress/.stop
 
 echo "## AgentBase: Stop Signal Sent"
@@ -824,6 +943,22 @@ if [[ ! -f "progress/status.json" ]]; then
   exit 1
 fi
 
+# Validate complete state - check all required files
+MISSING_STATE=()
+[[ ! -f "progress/status.json" ]] && MISSING_STATE+=("status.json")
+# tasks.json is optional but warn if missing
+TASKS_MISSING=false
+[[ ! -f "progress/tasks.json" ]] && TASKS_MISSING=true
+
+# Check if status.json is valid JSON (basic check)
+if ! grep -q '"last_cycle"' progress/status.json 2>/dev/null; then
+  echo "## AgentBase: Corrupted State"
+  echo ""
+  echo "progress/status.json appears to be corrupted or malformed."
+  echo "Run '/agentbase cleanup' and then '/agentbase go' to start fresh."
+  exit 1
+fi
+
 # Check if already running
 if [[ -f "progress/.lock" ]]; then
   echo "## AgentBase: Already Running"
@@ -836,11 +971,25 @@ fi
 LAST_CYCLE=$(cat progress/status.json | grep -o '"last_cycle":[0-9]*' | grep -o '[0-9]*')
 LAST_STATUS=$(cat progress/status.json | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
 
+# Validate extracted values
+if [[ -z "$LAST_CYCLE" ]]; then
+  echo "## AgentBase: Invalid State"
+  echo ""
+  echo "Could not read last_cycle from progress/status.json."
+  echo "Run '/agentbase cleanup' and then '/agentbase go' to start fresh."
+  exit 1
+fi
+
 echo "## AgentBase: Resuming"
 echo ""
 echo "Found previous state:"
 echo "  Last cycle: $LAST_CYCLE"
 echo "  Status: $LAST_STATUS"
+
+if [[ "$TASKS_MISSING" == "true" ]]; then
+  echo "  ⚠️  Note: tasks.json not found, will re-discover tasks"
+fi
+
 echo ""
 
 # Remove any stale stop signal
@@ -879,10 +1028,25 @@ Remove old state files, lock files, and reports:
 echo "## AgentBase: Cleanup"
 echo ""
 
-# Remove lock file
+# Warn if agent appears to be running
 if [[ -f "progress/.lock" ]]; then
-  echo "Removing lock file..."
-  rm -f progress/.lock
+  LOCK_AGE_SECONDS=$(( $(date +%s) - $(stat -c '%Y' "progress/.lock" 2>/dev/null || stat -f '%m' "progress/.lock" 2>/dev/null) ))
+  LOCK_AGE_HOURS=$(( LOCK_AGE_SECONDS / 3600 ))
+
+  if [[ $LOCK_AGE_HOURS -lt 4 ]]; then
+    echo "⚠️  WARNING: An Agent Planner may still be running!"
+    echo "   Lock file age: ${LOCK_AGE_HOURS}h $((LOCK_AGE_SECONDS % 3600 / 60))m"
+    echo ""
+    echo "   Removing the lock while the agent is running may cause issues."
+    echo "   Consider using '/agentbase stop' first."
+    echo ""
+    # Use AskUserQuestion: "Remove lock anyway?" → Yes/No
+  else
+    echo "Found stale lock file (${LOCK_AGE_HOURS}h old). Removing..."
+    rm -f progress/.lock
+  fi
+else
+  echo "No lock file found."
 fi
 
 # Remove stop signal
@@ -1007,14 +1171,29 @@ Runs discovery and outputs prioritized task list without spawning workers.
 /agentbase plan backend
 ```
 
-**Validate workstream exists first:**
+**Validate workstream argument and existence:**
 ```bash
 WS="$1"
-if [[ ! -f "instructions/${WS}.md" ]]; then
-  echo "ERROR: Workstream '$WS' not found."
+
+# Check for missing argument
+if [[ -z "$WS" ]]; then
+  echo "## AgentBase: Missing Workstream"
+  echo ""
+  echo "Usage: /agentbase plan <workstream>"
   echo ""
   echo "Available workstreams:"
-  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /'
+  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /' || echo "  (none found - run /agentbase init first)"
+  exit 1
+fi
+
+# Check workstream exists
+if [[ ! -f "instructions/${WS}.md" ]]; then
+  echo "## AgentBase: Workstream Not Found"
+  echo ""
+  echo "Workstream '$WS' does not exist."
+  echo ""
+  echo "Available workstreams:"
+  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /' || echo "  (none found - run /agentbase init first)"
   exit 1
 fi
 ```
@@ -1027,7 +1206,34 @@ Creates a plan for the specified workstream without executing.
 /agentbase work backend
 ```
 
-**Validate workstream first**, then spawns one worker for the top task.
+**Validate workstream argument and existence:**
+```bash
+WS="$1"
+
+# Check for missing argument
+if [[ -z "$WS" ]]; then
+  echo "## AgentBase: Missing Workstream"
+  echo ""
+  echo "Usage: /agentbase work <workstream>"
+  echo ""
+  echo "Available workstreams:"
+  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /' || echo "  (none found - run /agentbase init first)"
+  exit 1
+fi
+
+# Check workstream exists
+if [[ ! -f "instructions/${WS}.md" ]]; then
+  echo "## AgentBase: Workstream Not Found"
+  echo ""
+  echo "Workstream '$WS' does not exist."
+  echo ""
+  echo "Available workstreams:"
+  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /' || echo "  (none found - run /agentbase init first)"
+  exit 1
+fi
+```
+
+Spawns one worker for the top task in the specified workstream.
 
 ### `parallel [n]` - Spawn multiple workers
 
@@ -1035,11 +1241,27 @@ Creates a plan for the specified workstream without executing.
 /agentbase parallel 3
 ```
 
-**Validate n is between 1 and 8:**
+**Validate n argument:**
 ```bash
 N="$1"
+
+# Check for missing argument
+if [[ -z "$N" ]]; then
+  echo "## AgentBase: Missing Worker Count"
+  echo ""
+  echo "Usage: /agentbase parallel <n>"
+  echo ""
+  echo "Where n is the number of workers to spawn (1-8)."
+  echo "Example: /agentbase parallel 3"
+  exit 1
+fi
+
+# Validate n is a number between 1 and 8
 if ! [[ "$N" =~ ^[0-9]+$ ]] || [[ "$N" -lt 1 ]] || [[ "$N" -gt 8 ]]; then
-  echo "ERROR: Worker count must be between 1 and 8"
+  echo "## AgentBase: Invalid Worker Count"
+  echo ""
+  echo "Worker count must be a number between 1 and 8."
+  echo "Got: '$N'"
   exit 1
 fi
 ```
@@ -1104,6 +1326,37 @@ Initialize scaffolding for a new repo. See detailed instructions in the scaffold
 
 ## Scaffolding Generation (`init`)
 
+### Step 0: Check for Existing Scaffolding
+
+Before creating any files, check if scaffolding already exists:
+
+```bash
+EXISTING_FILES=()
+[[ -f "AGENTS.md" ]] && EXISTING_FILES+=("AGENTS.md")
+[[ -f "docs/philosophy.md" ]] && EXISTING_FILES+=("docs/philosophy.md")
+[[ -f "docs/triage.md" ]] && EXISTING_FILES+=("docs/triage.md")
+[[ -d "instructions" ]] && [[ -n "$(ls instructions/*.md 2>/dev/null)" ]] && EXISTING_FILES+=("instructions/*.md")
+[[ -d "progress" ]] && EXISTING_FILES+=("progress/")
+
+if [[ ${#EXISTING_FILES[@]} -gt 0 ]]; then
+  echo "## AgentBase: Existing Scaffolding Found"
+  echo ""
+  echo "The following agentbase files already exist:"
+  for f in "${EXISTING_FILES[@]}"; do
+    echo "  - $f"
+  done
+  echo ""
+  echo "Options:"
+  echo "  1. Keep existing files (cancel init)"
+  echo "  2. Backup and overwrite (creates *.backup files)"
+  echo "  3. Overwrite without backup"
+  echo ""
+  # Use AskUserQuestion tool to get user choice
+fi
+```
+
+If user chooses to backup, create `.backup` copies before overwriting.
+
 ### Step 1: Analyze Repository
 
 ```bash
@@ -1165,7 +1418,36 @@ fi
 /agentbase worktree frontend
 ```
 
-**Validate workstream first**, then creates `../project-frontend/` with dedicated branch.
+**Validate workstream argument and existence:**
+```bash
+WS="$1"
+
+# Check for missing argument
+if [[ -z "$WS" ]]; then
+  echo "## AgentBase: Missing Workstream"
+  echo ""
+  echo "Usage: /agentbase worktree <workstream>"
+  echo ""
+  echo "Creates an isolated git worktree for the specified workstream."
+  echo ""
+  echo "Available workstreams:"
+  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /' || echo "  (none found - run /agentbase init first)"
+  exit 1
+fi
+
+# Check workstream exists
+if [[ ! -f "instructions/${WS}.md" ]]; then
+  echo "## AgentBase: Workstream Not Found"
+  echo ""
+  echo "Workstream '$WS' does not exist."
+  echo ""
+  echo "Available workstreams:"
+  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /' || echo "  (none found - run /agentbase init first)"
+  exit 1
+fi
+```
+
+Creates `../project-<workstream>/` with dedicated branch `agentbase/<workstream>`.
 
 ---
 
