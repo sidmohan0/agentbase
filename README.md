@@ -37,6 +37,10 @@ Workers operate on isolated **workstreams** (e.g., `frontend`, `backend`, `api`)
 ## Quick Start
 
 ```bash
+
+# 0. Clone repo
+https://github.com/sidmohan0/agentbase.git
+
 # 1. Install the skill
 cp -r skill/ ~/.claude/skills/agentbase/
 # Or for project-local: cp -r skill/ .claude/skills/agentbase/
