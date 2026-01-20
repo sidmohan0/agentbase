@@ -67,6 +67,8 @@ cp -r skill/ ~/.claude/skills/agentbase/
 | `/agentbase goals` | View/set high-level goals |
 | `/agentbase status` | Check current state and progress |
 | `/agentbase stop` | Signal Agent Planner to stop gracefully |
+| `/agentbase resume` | Resume from last saved state |
+| `/agentbase cleanup` | Remove old state files and reports |
 
 ### Setup
 
@@ -172,6 +174,24 @@ From the [Cursor research](https://cursor.com/blog/scaling-agents):
 ## Contributing
 
 Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Updating
+
+```bash
+# If you cloned the repo, just pull and re-copy
+cd ~/path/to/agentbase && git pull && cp -r skill/ ~/.claude/skills/agentbase/
+```
+
+See [INSTALL.md](INSTALL.md) for more update options.
+
+## Version
+
+Current version: **1.1.0**
+
+Check your installed version:
+```bash
+cat ~/.claude/skills/agentbase/VERSION
+```
 
 ## License
 

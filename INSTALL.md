@@ -109,11 +109,71 @@ Run `/agentbase init` to generate scaffolding, or `/agentbase setup` to create a
 
 ## Updating
 
+### Method 1: If You Cloned the Repo (Recommended)
+
+Keep the cloned repo around for easy updates:
+
 ```bash
-# If installed via git clone
-cd path/to/agentbase
-git pull
+# Go to your cloned repo
+cd ~/path/to/agentbase   # wherever you cloned it
+
+# Pull latest changes
+git pull origin main
+
+# Re-copy to skills directory
 cp -r skill/ ~/.claude/skills/agentbase/
+
+# Verify version
+cat ~/.claude/skills/agentbase/VERSION
+```
+
+### Method 2: One-Liner Update (Fresh Download)
+
+If you didn't keep the repo, re-download:
+
+```bash
+# Global installation
+curl -sL https://raw.githubusercontent.com/sidmohan0/agentbase/main/skill/SKILL.md -o ~/.claude/skills/agentbase/SKILL.md && \
+curl -sL https://raw.githubusercontent.com/sidmohan0/agentbase/main/skill/scripts/multi-session.sh -o ~/.claude/skills/agentbase/scripts/multi-session.sh && \
+curl -sL https://raw.githubusercontent.com/sidmohan0/agentbase/main/skill/VERSION -o ~/.claude/skills/agentbase/VERSION && \
+chmod +x ~/.claude/skills/agentbase/scripts/multi-session.sh && \
+echo "Updated to $(cat ~/.claude/skills/agentbase/VERSION)"
+```
+
+### Method 3: Project-Local Update
+
+```bash
+# From your project root
+rm -rf .claude/skills/agentbase/
+git clone --depth 1 https://github.com/sidmohan0/agentbase.git /tmp/agentbase
+cp -r /tmp/agentbase/skill/ .claude/skills/agentbase/
+rm -rf /tmp/agentbase
+git add .claude/skills/agentbase/
+git commit -m "Update agentbase skill to $(cat .claude/skills/agentbase/VERSION)"
+```
+
+### Check Current Version
+
+```bash
+# See what version you have installed
+cat ~/.claude/skills/agentbase/VERSION 2>/dev/null || echo "Version file not found (pre-1.1.0)"
+
+# See latest available version
+curl -sL https://raw.githubusercontent.com/sidmohan0/agentbase/main/skill/VERSION
+```
+
+### Recommended: Keep the Repo
+
+For easiest updates, clone once and keep it:
+
+```bash
+# Initial setup (do once)
+mkdir -p ~/tools
+git clone https://github.com/sidmohan0/agentbase.git ~/tools/agentbase
+cp -r ~/tools/agentbase/skill/ ~/.claude/skills/agentbase/
+
+# Future updates (just run this)
+cd ~/tools/agentbase && git pull && cp -r skill/ ~/.claude/skills/agentbase/
 ```
 
 ## Uninstalling

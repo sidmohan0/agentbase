@@ -11,6 +11,16 @@ argument-hint: [command] [args]
 
 You are the **interface layer** between a human orchestrator and an autonomous Agent Planner system, based on the methodology from Cursor's "Scaling Long-Running Autonomous Coding" research.
 
+## Platform Requirements
+
+> **This skill requires macOS or Linux.** Windows is not supported due to:
+> - Unix-specific memory detection (`sysctl`, `/proc/meminfo`)
+> - Bash shell syntax throughout
+> - Unix temp file paths (`/tmp/`)
+> - Git worktree behavior differences
+
+---
+
 ## Architecture Overview
 
 ```
@@ -71,6 +81,8 @@ Parse `$ARGUMENTS` to determine the command:
 | `goals` | View/set high-level goals for the Agent Planner |
 | `status` | Show current state across all workstreams |
 | `stop` | Signal Agent Planner to stop after current cycle |
+| `resume` | Resume Agent Planner from last saved state |
+| `cleanup` | Remove old state files, lock files, and reports |
 | `triage` | Analyze failures and prioritize work (manual mode) |
 | `plan [workstream]` | Create tasks for a specific workstream (manual mode) |
 | `work [workstream]` | Spawn a single worker (manual mode) |
@@ -83,9 +95,69 @@ Parse `$ARGUMENTS` to determine the command:
 
 ---
 
-## Step 0: Check for Scaffolding (ALWAYS DO THIS FIRST)
+## Step 0: Pre-Flight Checks (ALWAYS DO THIS FIRST)
 
-Before ANY command except `init`, check if scaffolding exists:
+Before ANY command, run these checks:
+
+### 0.1 Platform Check
+
+```bash
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+  echo "ERROR: AgentBase requires macOS or Linux. Windows is not supported."
+  exit 1
+fi
+```
+
+### 0.2 Dependency Check
+
+```bash
+echo "## AgentBase: Checking Dependencies"
+echo ""
+
+# Required
+MISSING_REQUIRED=false
+if ! command -v git &>/dev/null; then
+  echo "ERROR: git is required but not installed"
+  MISSING_REQUIRED=true
+fi
+
+if ! command -v bash &>/dev/null; then
+  echo "ERROR: bash is required but not installed"
+  MISSING_REQUIRED=true
+fi
+
+if [[ "$MISSING_REQUIRED" == "true" ]]; then
+  echo ""
+  echo "Please install missing required dependencies and try again."
+  exit 1
+fi
+
+# Optional (inform but continue)
+echo "Optional tools:"
+command -v gh &>/dev/null && echo "  [OK] gh (GitHub CLI)" || echo "  [--] gh not installed (GitHub issues disabled)"
+command -v npm &>/dev/null && echo "  [OK] npm" || echo "  [--] npm not installed"
+command -v cargo &>/dev/null && echo "  [OK] cargo" || echo "  [--] cargo not installed"
+command -v pytest &>/dev/null && echo "  [OK] pytest" || echo "  [--] pytest not installed"
+command -v tsc &>/dev/null && echo "  [OK] tsc (TypeScript)" || echo "  [--] tsc not installed"
+command -v mypy &>/dev/null && echo "  [OK] mypy" || echo "  [--] mypy not installed"
+echo ""
+```
+
+### 0.3 Git Repository Check
+
+```bash
+if ! git rev-parse --git-dir &>/dev/null; then
+  echo "WARNING: Not a git repository. Some features (worktrees, diff tracking) will be disabled."
+  echo "Run 'git init' to enable full functionality."
+  IS_GIT_REPO=false
+else
+  IS_GIT_REPO=true
+fi
+```
+
+### 0.4 Scaffolding Check (for commands except `init`)
+
+Before ANY command except `init`, `cleanup`, check if scaffolding exists:
 
 ```bash
 ls AGENTS.md 2>/dev/null || echo "MISSING: AGENTS.md"
@@ -112,6 +184,27 @@ Run `/agentbase init` to analyze this repo and generate the scaffolding.
 
 **Then STOP.** Do not attempt other commands without scaffolding.
 
+### 0.5 Lock File Check (for `go` command)
+
+```bash
+LOCK_FILE="progress/.lock"
+if [[ -f "$LOCK_FILE" ]]; then
+  LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
+  LOCK_TIME=$(stat -f %Sm -t "%Y-%m-%d %H:%M" "$LOCK_FILE" 2>/dev/null || stat -c %y "$LOCK_FILE" 2>/dev/null | cut -d. -f1)
+
+  echo "## AgentBase: Already Running"
+  echo ""
+  echo "An Agent Planner appears to be running (lock file exists)."
+  echo "  Lock created: $LOCK_TIME"
+  echo ""
+  echo "Options:"
+  echo "  /agentbase status   - Check current progress"
+  echo "  /agentbase stop     - Signal graceful shutdown"
+  echo "  /agentbase cleanup  - Force remove lock (if stale)"
+  exit 1
+fi
+```
+
 ---
 
 ## The `go` Command (Primary Interface)
@@ -126,25 +219,113 @@ This is the main command. It launches an autonomous Agent Planner that runs cont
 /agentbase go --cycles 5          # Limit to 5 planning cycles
 /agentbase go --report-every 2    # Report to human every 2 cycles
 /agentbase go --workers auto      # Auto-detect optimal worker count based on memory
+/agentbase go --workers 3         # Set specific worker count
+```
+
+### Parameter Validation
+
+Before starting, validate all parameters:
+
+```bash
+# Default values
+MAX_CYCLES=10
+REPORT_EVERY=3
+MAX_WORKERS="auto"
+GOAL=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cycles)
+      MAX_CYCLES="$2"
+      # Bounds check: 1-100
+      if ! [[ "$MAX_CYCLES" =~ ^[0-9]+$ ]] || [[ "$MAX_CYCLES" -lt 1 ]] || [[ "$MAX_CYCLES" -gt 100 ]]; then
+        echo "ERROR: --cycles must be a number between 1 and 100"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --report-every)
+      REPORT_EVERY="$2"
+      # Bounds check: 1-50
+      if ! [[ "$REPORT_EVERY" =~ ^[0-9]+$ ]] || [[ "$REPORT_EVERY" -lt 1 ]] || [[ "$REPORT_EVERY" -gt 50 ]]; then
+        echo "ERROR: --report-every must be a number between 1 and 50"
+        exit 1
+      fi
+      shift 2
+      ;;
+    --workers)
+      MAX_WORKERS="$2"
+      # Bounds check: 1-8 or "auto"
+      if [[ "$MAX_WORKERS" != "auto" ]]; then
+        if ! [[ "$MAX_WORKERS" =~ ^[0-9]+$ ]] || [[ "$MAX_WORKERS" -lt 1 ]] || [[ "$MAX_WORKERS" -gt 8 ]]; then
+          echo "ERROR: --workers must be 'auto' or a number between 1 and 8"
+          exit 1
+        fi
+      fi
+      shift 2
+      ;;
+    -*)
+      echo "ERROR: Unknown option: $1"
+      exit 1
+      ;;
+    *)
+      GOAL="$1"
+      shift
+      ;;
+  esac
+done
+```
+
+### Goal Validation
+
+Goals must be sanitized to prevent prompt injection:
+
+```bash
+# Validate goal string
+if [[ -n "$GOAL" ]]; then
+  # Check length (max 500 chars)
+  if [[ ${#GOAL} -gt 500 ]]; then
+    echo "ERROR: Goal too long (max 500 characters)"
+    exit 1
+  fi
+
+  # Check for suspicious patterns
+  if [[ "$GOAL" =~ [\`\$\(\)\{\}\;\|] ]]; then
+    echo "ERROR: Goal contains invalid characters. Avoid: \` \$ ( ) { } ; |"
+    exit 1
+  fi
+
+  # Escape for safe interpolation
+  GOAL_ESCAPED=$(printf '%s' "$GOAL" | sed 's/["\]/\\&/g')
+fi
 ```
 
 ### Auto-Detecting Worker Count
 
-Before spawning the Agent Planner, detect available system memory to suggest optimal parallelism:
+Before spawning the Agent Planner, detect available system memory:
 
 ```bash
-# macOS
-TOTAL_MEM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
+# Detect OS and get memory
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  TOTAL_MEM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
+elif [[ -f /proc/meminfo ]]; then
+  TOTAL_MEM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
+else
+  echo "WARNING: Could not detect system memory. Using default of 2 workers."
+  TOTAL_MEM_GB=8
+fi
 
-# Linux
-# TOTAL_MEM_GB=$(( $(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024 ))
+# Calculate recommended workers: ~1 per 4GB RAM, min 1, max 8
+if [[ "$MAX_WORKERS" == "auto" ]]; then
+  RECOMMENDED_WORKERS=$(( TOTAL_MEM_GB / 4 ))
+  [[ $RECOMMENDED_WORKERS -lt 1 ]] && RECOMMENDED_WORKERS=1
+  [[ $RECOMMENDED_WORKERS -gt 8 ]] && RECOMMENDED_WORKERS=8
+  MAX_WORKERS=$RECOMMENDED_WORKERS
+fi
 
-# Recommend ~1 worker per 4GB RAM, min 1, max 8
-RECOMMENDED_WORKERS=$(( TOTAL_MEM_GB / 4 ))
-[[ $RECOMMENDED_WORKERS -lt 1 ]] && RECOMMENDED_WORKERS=1
-[[ $RECOMMENDED_WORKERS -gt 8 ]] && RECOMMENDED_WORKERS=8
-
-echo "System has ${TOTAL_MEM_GB}GB RAM. Recommended max workers: ${RECOMMENDED_WORKERS}"
+echo "System: ${TOTAL_MEM_GB}GB RAM detected"
+echo "Workers: $MAX_WORKERS (configurable via --workers N)"
 ```
 
 | RAM | Recommended Workers |
@@ -154,14 +335,12 @@ echo "System has ${TOTAL_MEM_GB}GB RAM. Recommended max workers: ${RECOMMENDED_W
 | 32GB | 8 |
 | 64GB+ | 8 (capped) |
 
-Output this recommendation when starting:
-```
-## AgentBase Go
+### Create Lock File
 
-System: 16GB RAM detected
-Recommended workers: 4 (configurable via --workers N)
-
-Launching Agent Planner...
+```bash
+mkdir -p progress
+echo "$$" > progress/.lock
+echo "$(date -Iseconds)" >> progress/.lock
 ```
 
 ### What Happens
@@ -176,8 +355,16 @@ Launching Agent Planner...
    - Judge progress
    - Report to human (periodically)
    - Repeat until done or blocked
-4. **You** receive periodic status updates
-5. **You** can intervene anytime with `/agentbase stop`
+4. **You** can check progress anytime with `/agentbase status`
+5. **You** can signal stop with `/agentbase stop`
+
+### Important: Stop Behavior
+
+> **Note on stopping:** The Agent Planner runs as a background task. When you run `/agentbase stop`, it creates a signal file (`progress/.stop`). However, the Agent Planner may not see this until it completes its current cycle.
+>
+> **This is a graceful shutdown signal, not an immediate kill.**
+>
+> If you need to check whether the agent has stopped, run `/agentbase status`.
 
 ### Spawning the Agent Planner
 
@@ -204,7 +391,7 @@ Use this template when spawning the Agent Planner:
 You are the **AGENT PLANNER** in a hierarchical multi-agent system. You operate autonomously, reporting to a human Master Orchestrator.
 
 ## Your Mission
-[GOAL FROM USER OR "Discover and fix all issues in priority order"]
+[GOAL_ESCAPED or "Discover and fix all issues in priority order"]
 
 ## Your Loop
 
@@ -226,10 +413,10 @@ Execute this loop until goal achieved, blocked, or max cycles reached:
 ```
 
 ## Configuration
-- **Max cycles**: [MAX_CYCLES or 10]
-- **Report every**: [REPORT_EVERY or 3] cycles
-- **Max workers per cycle**: [MAX_WORKERS or auto-detected based on RAM]
-- **System RAM**: [DETECTED_RAM]GB
+- **Max cycles**: [MAX_CYCLES]
+- **Report every**: [REPORT_EVERY] cycles
+- **Max workers per cycle**: [MAX_WORKERS]
+- **System RAM**: [TOTAL_MEM_GB]GB
 - **Stop on**: P0 issues resolved, no progress for 2 cycles, or human stop signal
 
 ## Coordination Documents
@@ -244,44 +431,70 @@ instructions/<ws>.md         # Per-workstream scope
 
 ## Phase 1: DISCOVER
 
-Find tasks from these sources (in priority order):
+Find tasks from these sources (in priority order). **Use timeouts on all commands.**
 
 ### 1.1 Failing Tests (P0-P1)
 ```bash
-# Detect project type and run appropriate test command
+# Create unique temp file
+TEST_OUTPUT=$(mktemp)
+trap "rm -f $TEST_OUTPUT" EXIT
+
+# Detect project type and run appropriate test command WITH TIMEOUT
 if [[ -f "package.json" ]]; then
-  npm test 2>&1 | tee /tmp/test-output.txt
-  grep -E "FAIL|Error|failed" /tmp/test-output.txt
+  timeout 300 npm test 2>&1 | tee "$TEST_OUTPUT" || echo "Tests timed out or failed"
+  grep -E "FAIL|Error|failed" "$TEST_OUTPUT" | head -20
 elif [[ -f "Cargo.toml" ]]; then
-  cargo test 2>&1 | grep -E "FAILED|error\[E"
+  timeout 300 cargo test 2>&1 | tee "$TEST_OUTPUT" || echo "Tests timed out or failed"
+  grep -E "FAILED|error\[E" "$TEST_OUTPUT" | head -20
 elif [[ -f "pyproject.toml" ]] || [[ -f "setup.py" ]]; then
-  pytest --tb=no -q 2>&1 | grep -E "FAILED|ERROR"
+  timeout 300 pytest --tb=no -q 2>&1 | tee "$TEST_OUTPUT" || echo "Tests timed out or failed"
+  grep -E "FAILED|ERROR" "$TEST_OUTPUT" | head -20
+else
+  echo "No recognized test framework found (package.json, Cargo.toml, pyproject.toml)"
 fi
 ```
 
 ### 1.2 Type/Lint Errors (P1-P2)
 ```bash
-# TypeScript
-[[ -f "tsconfig.json" ]] && npx tsc --noEmit 2>&1 | head -30
+# TypeScript (with timeout)
+if [[ -f "tsconfig.json" ]] && command -v npx &>/dev/null; then
+  timeout 120 npx tsc --noEmit 2>&1 | head -30
+fi
 
-# Python
-[[ -f "pyproject.toml" ]] && mypy . 2>&1 | grep -E "error:" | head -30
+# Python (with timeout)
+if [[ -f "pyproject.toml" ]] && command -v mypy &>/dev/null; then
+  timeout 120 mypy . 2>&1 | grep -E "error:" | head -30
+fi
 ```
 
 ### 1.3 GitHub Issues (P2-P4)
 ```bash
-gh issue list --label "bug" --state open --json number,title,labels 2>/dev/null | head -20
+# Only if gh is installed and authenticated
+if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+  timeout 30 gh issue list --label "bug" --state open --json number,title,labels 2>/dev/null | head -20
+else
+  echo "GitHub CLI not available or not authenticated. Skipping issue discovery."
+fi
 ```
 
 ### 1.4 Code TODOs (P3-P5)
 ```bash
-grep -rn "TODO\|FIXME\|HACK" src/ --include="*.ts" --include="*.py" --include="*.rs" 2>/dev/null | head -20
+# Use --max-count to limit results on large repos
+grep -rn --max-count=5 "TODO\|FIXME\|HACK" src/ --include="*.ts" --include="*.py" --include="*.rs" --include="*.go" --include="*.js" 2>/dev/null | head -20
 ```
 
 ### 1.5 Previous Progress
 ```bash
 cat progress/tasks.json 2>/dev/null
 cat progress/status.json 2>/dev/null
+```
+
+### 1.6 Check for Stop Signal
+```bash
+if [[ -f "progress/.stop" ]]; then
+  echo "Stop signal detected. Finishing current cycle and exiting."
+  SHOULD_STOP=true
+fi
 ```
 
 ## Phase 2: TRIAGE
@@ -304,8 +517,22 @@ Categorize discovered tasks:
 For each workstream with pending tasks:
 
 1. Read `instructions/<workstream>.md` for scope
-2. Match tasks to workstream ownership
-3. Create specific, measurable task assignments
+2. **Validate workstream exists**: `ls instructions/<workstream>.md` must succeed
+3. Match tasks to workstream ownership
+4. Create specific, measurable task assignments
+
+**Workstream Validation:**
+```bash
+validate_workstream() {
+  local ws="$1"
+  if [[ ! -f "instructions/${ws}.md" ]]; then
+    echo "ERROR: Workstream '$ws' not found. Available workstreams:"
+    ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g'
+    return 1
+  fi
+  return 0
+}
+```
 
 Write plan to `progress/current_plan.json`:
 ```json
@@ -360,6 +587,7 @@ prompt: |
   - No page/case-specific hacks
   - No panics - return errors cleanly
   - If blocked, document why and report back
+  - Use timeouts on long-running commands
 
   Work until done or blocked.
 </Task>
@@ -377,14 +605,20 @@ Monitor spawned workers:
 Evaluate the cycle:
 
 ```bash
-# Check test status
-npm test 2>&1 | grep -E "passed|failed" | tail -5
+# Check test status (with timeout)
+timeout 300 npm test 2>&1 | grep -E "passed|failed" | tail -5
 
 # Check for new errors
-npx tsc --noEmit 2>&1 | wc -l
+if [[ -f "tsconfig.json" ]]; then
+  timeout 60 npx tsc --noEmit 2>&1 | wc -l
+fi
 
-# Compare to previous state
-git diff --stat HEAD~1
+# Compare to previous state (only if git repo with commits)
+if git rev-parse HEAD~1 &>/dev/null; then
+  git diff --stat HEAD~1
+else
+  echo "No previous commit to compare against"
+fi
 ```
 
 **Decision matrix:**
@@ -395,7 +629,7 @@ git diff --stat HEAD~1
 | All P0-P2 tasks done | **GOAL ACHIEVED** → Stop |
 | No progress for 2 cycles | **STALLED** → Report to human, stop |
 | Worker reported blocker | **BLOCKED** → Report to human, stop |
-| Human sent stop signal | **STOPPED** → Report final status |
+| Stop signal file exists | **STOPPED** → Report final status |
 
 ## Phase 7: REPORT
 
@@ -428,17 +662,32 @@ Every [REPORT_EVERY] cycles, write a status report:
 - Time elapsed: T
 ```
 
-**Also output to console** so human sees it.
+**Also update `progress/status.json`:**
+```json
+{
+  "last_cycle": N,
+  "status": "running",
+  "last_report": "2024-01-20T10:30:00Z",
+  "tasks_completed": X,
+  "tasks_remaining": Y
+}
+```
 
 ## Phase 8: DECIDE
 
 Based on Judge evaluation:
 
 - **CONTINUE**: Increment cycle, go to Phase 1
-- **GOAL ACHIEVED**: Write final report, exit with success
-- **STALLED**: Write report explaining lack of progress, exit
-- **BLOCKED**: Write report with blocker details, exit
-- **STOPPED**: Write final status, exit
+- **GOAL ACHIEVED**: Write final report, remove lock file, exit with success
+- **STALLED**: Write report explaining lack of progress, remove lock file, exit
+- **BLOCKED**: Write report with blocker details, remove lock file, exit
+- **STOPPED**: Write final status, remove lock file, exit
+
+**Always clean up on exit:**
+```bash
+rm -f progress/.lock
+rm -f progress/.stop
+```
 
 ## State Files
 
@@ -446,9 +695,12 @@ Maintain these files for persistence:
 
 ```
 progress/
+├── .lock                # Lock file (PID + timestamp)
+├── .stop                # Stop signal file
 ├── status.json          # Overall status
 ├── tasks.json           # Discovered tasks
 ├── current_plan.json    # Active plan
+├── goals.json           # User-defined goals
 └── reports/
     ├── cycle-1.md
     ├── cycle-2.md
@@ -461,7 +713,8 @@ progress/
 2. **Never work outside workstream scope** - Respect ownership boundaries
 3. **Measurable outcomes only** - "If you can't show a delta, you're not done"
 4. **Report blockers immediately** - Don't spin on unsolvable problems
-5. **Commit progress to git** - State must survive restarts
+5. **Use timeouts on all external commands** - Never hang indefinitely
+6. **Clean up lock files on exit** - Always remove progress/.lock
 
 ## Stop Conditions
 
@@ -470,9 +723,12 @@ Stop the loop if ANY of these occur:
 - Max cycles reached
 - No progress for 2 consecutive cycles
 - Worker reports unresolvable blocker
-- Human signals stop (check for `progress/.stop` file)
+- Stop signal file exists (`progress/.stop`)
 
-When stopping, ALWAYS write a final report.
+When stopping, ALWAYS:
+1. Write a final report
+2. Remove `progress/.lock`
+3. Remove `progress/.stop` (if exists)
 ```
 
 ---
@@ -507,7 +763,7 @@ Set new goals:
 /agentbase goals set "Fix all P0 and P1 issues"
 ```
 
-Writes to `progress/goals.json`:
+**Validate the goal first** (same validation as `go` command), then write to `progress/goals.json`:
 ```json
 {
   "updated_at": "2024-01-20T10:00:00Z",
@@ -532,11 +788,136 @@ Signal the Agent Planner to stop gracefully:
 /agentbase stop
 ```
 
-This creates `progress/.stop` file. The Agent Planner checks for this file each cycle and stops gracefully if found.
+```bash
+mkdir -p progress
+touch progress/.stop
+echo "$(date -Iseconds)" > progress/.stop
+
+echo "## AgentBase: Stop Signal Sent"
+echo ""
+echo "The Agent Planner will stop after completing its current cycle."
+echo ""
+echo "Note: This is a graceful shutdown. The agent may take some time to"
+echo "finish current work before stopping."
+echo ""
+echo "Use '/agentbase status' to check if the agent has stopped."
+```
+
+---
+
+## The `resume` Command
+
+Resume the Agent Planner from the last saved state:
+
+```
+/agentbase resume
+```
+
+### Implementation
 
 ```bash
-touch progress/.stop
-echo "Stop signal sent. Agent Planner will stop after current cycle."
+# Check if there's state to resume from
+if [[ ! -f "progress/status.json" ]]; then
+  echo "## AgentBase: Nothing to Resume"
+  echo ""
+  echo "No previous state found. Use '/agentbase go' to start fresh."
+  exit 1
+fi
+
+# Check if already running
+if [[ -f "progress/.lock" ]]; then
+  echo "## AgentBase: Already Running"
+  echo ""
+  echo "Agent Planner is already running. Use '/agentbase status' to check progress."
+  exit 1
+fi
+
+# Load previous state
+LAST_CYCLE=$(cat progress/status.json | grep -o '"last_cycle":[0-9]*' | grep -o '[0-9]*')
+LAST_STATUS=$(cat progress/status.json | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+
+echo "## AgentBase: Resuming"
+echo ""
+echo "Found previous state:"
+echo "  Last cycle: $LAST_CYCLE"
+echo "  Status: $LAST_STATUS"
+echo ""
+
+# Remove any stale stop signal
+rm -f progress/.stop
+
+# Load goals if they exist
+if [[ -f "progress/goals.json" ]]; then
+  GOAL=$(cat progress/goals.json | grep -o '"description":"[^"]*"' | head -1 | cut -d'"' -f4)
+  echo "  Goal: $GOAL"
+else
+  GOAL="Continue from previous state"
+fi
+
+echo ""
+echo "Resuming Agent Planner..."
+```
+
+Then spawn the Agent Planner with:
+- `START_CYCLE = LAST_CYCLE + 1`
+- Previous goal loaded from `progress/goals.json`
+- Previous tasks loaded from `progress/tasks.json`
+
+---
+
+## The `cleanup` Command
+
+Remove old state files, lock files, and reports:
+
+```
+/agentbase cleanup
+```
+
+### Implementation
+
+```bash
+echo "## AgentBase: Cleanup"
+echo ""
+
+# Remove lock file
+if [[ -f "progress/.lock" ]]; then
+  echo "Removing lock file..."
+  rm -f progress/.lock
+fi
+
+# Remove stop signal
+if [[ -f "progress/.stop" ]]; then
+  echo "Removing stop signal..."
+  rm -f progress/.stop
+fi
+
+# Ask about reports
+REPORT_COUNT=$(ls progress/reports/*.md 2>/dev/null | wc -l)
+if [[ $REPORT_COUNT -gt 0 ]]; then
+  echo ""
+  echo "Found $REPORT_COUNT report files in progress/reports/"
+  echo "Remove all reports? This cannot be undone."
+fi
+```
+
+**Use AskUserQuestion tool to confirm:**
+- "Remove all reports?" → Yes/No
+
+If confirmed:
+```bash
+rm -rf progress/reports/*
+echo "Reports removed."
+```
+
+Optional deep clean:
+```bash
+# Full reset (if user confirms)
+rm -f progress/status.json
+rm -f progress/tasks.json
+rm -f progress/current_plan.json
+rm -f progress/goals.json
+rm -rf progress/reports/
+echo "Full cleanup complete. Run '/agentbase init' to start fresh."
 ```
 
 ---
@@ -549,16 +930,17 @@ Show current state without starting the planner:
 /agentbase status
 ```
 
-1. Read `progress/status.json`, `progress/tasks.json`, `progress/current_plan.json`
-2. Read latest report from `progress/reports/`
-3. Output summary:
+1. Check lock file to determine if running
+2. Read `progress/status.json`, `progress/tasks.json`, `progress/current_plan.json`
+3. **Read latest report from `progress/reports/`**
+4. Output summary:
 
 ```
 ## AgentBase Status
 
 ### Agent Planner
 - Status: [Running cycle 3 | Idle | Stopped]
-- Last report: 2024-01-20 10:30:00
+- Last activity: 2024-01-20 10:30:00
 
 ### Goals
 1. Fix all P0 and P1 issues (active)
@@ -581,6 +963,28 @@ Show current state without starting the planner:
 - [10:30] Completed: Fix auth crash (backend)
 - [10:25] Started: Resolve type errors (backend)
 - [10:20] Completed: Fix login button (frontend)
+
+### Latest Report
+```
+[Include contents of most recent progress/reports/cycle-N.md file]
+```
+
+Check progress/reports/ for full history.
+```
+
+**Implementation to surface reports:**
+```bash
+# Find most recent report
+LATEST_REPORT=$(ls -t progress/reports/cycle-*.md 2>/dev/null | head -1)
+if [[ -n "$LATEST_REPORT" ]]; then
+  echo ""
+  echo "### Latest Report ($(basename $LATEST_REPORT))"
+  echo ""
+  cat "$LATEST_REPORT"
+  echo ""
+  echo "---"
+  echo "Full report history: progress/reports/"
+fi
 ```
 
 ---
@@ -603,6 +1007,18 @@ Runs discovery and outputs prioritized task list without spawning workers.
 /agentbase plan backend
 ```
 
+**Validate workstream exists first:**
+```bash
+WS="$1"
+if [[ ! -f "instructions/${WS}.md" ]]; then
+  echo "ERROR: Workstream '$WS' not found."
+  echo ""
+  echo "Available workstreams:"
+  ls instructions/*.md 2>/dev/null | sed 's|instructions/||g; s|\.md||g' | sed 's/^/  - /'
+  exit 1
+fi
+```
+
 Creates a plan for the specified workstream without executing.
 
 ### `work [workstream]` - Spawn a single worker
@@ -611,12 +1027,21 @@ Creates a plan for the specified workstream without executing.
 /agentbase work backend
 ```
 
-Spawns one worker for the top task in the specified workstream.
+**Validate workstream first**, then spawns one worker for the top task.
 
 ### `parallel [n]` - Spawn multiple workers
 
 ```
 /agentbase parallel 3
+```
+
+**Validate n is between 1 and 8:**
+```bash
+N="$1"
+if ! [[ "$N" =~ ^[0-9]+$ ]] || [[ "$N" -lt 1 ]] || [[ "$N" -gt 8 ]]; then
+  echo "ERROR: Worker count must be between 1 and 8"
+  exit 1
+fi
 ```
 
 Spawns n workers across top-priority tasks.
@@ -628,6 +1053,46 @@ Spawns n workers across top-priority tasks.
 ```
 
 Evaluates current progress and outputs recommendation.
+
+### `discover` - Manual task discovery
+
+```
+/agentbase discover
+```
+
+Runs all discovery sources (tests, types, issues, TODOs) and outputs findings without triaging or planning. Useful for understanding what work exists.
+
+**Implementation:**
+```bash
+echo "## AgentBase: Task Discovery"
+echo ""
+echo "Scanning codebase for tasks..."
+echo ""
+
+# Run each discovery source with clear headers
+echo "### 1. Test Failures"
+# [test discovery code with timeouts]
+
+echo ""
+echo "### 2. Type/Lint Errors"
+# [type checking code with timeouts]
+
+echo ""
+echo "### 3. GitHub Issues"
+# [gh issue list code]
+
+echo ""
+echo "### 4. Code TODOs"
+# [grep code]
+
+echo ""
+echo "### 5. Previous Progress"
+# [read progress files]
+
+echo ""
+echo "---"
+echo "Run '/agentbase triage' to prioritize these tasks."
+```
 
 ---
 
@@ -642,8 +1107,8 @@ Initialize scaffolding for a new repo. See detailed instructions in the scaffold
 ### Step 1: Analyze Repository
 
 ```bash
-ls -la *.json *.toml *.yaml Cargo.toml package.json pyproject.toml 2>/dev/null
-find . -type d -name "src" -o -name "lib" -o -name "app" 2>/dev/null | head -10
+ls -la *.json *.toml *.yaml Cargo.toml package.json pyproject.toml go.mod 2>/dev/null
+find . -maxdepth 3 -type d -name "src" -o -name "lib" -o -name "app" -o -name "pkg" 2>/dev/null | head -10
 ```
 
 ### Step 2: Detect Stack
@@ -685,13 +1150,22 @@ Show preview, get user confirmation, then write files.
 
 Creates `../project-agentbase/` worktree for experimentation.
 
+**Requires git repo:**
+```bash
+if ! git rev-parse --git-dir &>/dev/null; then
+  echo "ERROR: Not a git repository. Worktrees require git."
+  echo "Run 'git init' first."
+  exit 1
+fi
+```
+
 ### `worktree [workstream]` - Per-workstream isolation
 
 ```
 /agentbase worktree frontend
 ```
 
-Creates `../project-frontend/` with dedicated branch.
+**Validate workstream first**, then creates `../project-frontend/` with dedicated branch.
 
 ---
 
@@ -716,6 +1190,8 @@ This creates separate Claude sessions per workstream, each with its own worktree
 4. **Judge is Objective** - Measurable progress or stop
 5. **Prompts > Infrastructure** - This file IS the system
 6. **Simplicity Wins** - Remove complexity, don't add it
+7. **Always Use Timeouts** - Never let commands hang
+8. **Validate All Inputs** - Check parameters, workstreams, goals
 
 ---
 
@@ -726,35 +1202,48 @@ User: /agentbase init
 AgentBase: [analyzes repo, generates scaffolding]
 
 User: /agentbase goals set "Fix all failing tests and type errors"
-AgentBase: [writes goals to progress/goals.json]
+AgentBase: [validates goal, writes to progress/goals.json]
 
 User: /agentbase go
-AgentBase: [spawns Agent Planner, shows initial status]
-
-... Agent Planner runs autonomously ...
-
 AgentBase:
-## Agent Planner Report: Cycle 3
+## AgentBase Go
 
-### Summary
-- Status: CONTINUING
-- Tasks completed: 5
-- Tasks remaining: 3
+System: 16GB RAM detected
+Workers: 4 (configurable via --workers N)
 
-### Progress
-- [x] Fixed auth crash (P0)
-- [x] Fixed 3 type errors (P1)
-- [x] Fixed login test (P1)
-- [ ] API validation (P2) - in progress
+Launching Agent Planner...
 
-### Next
-Continuing with P2 tasks...
-
-... more cycles ...
+[Agent Planner spawned in background]
 
 User: /agentbase status
-AgentBase: [shows current state]
+AgentBase:
+## AgentBase Status
+
+### Agent Planner
+- Status: Running cycle 3
+- Last activity: 2024-01-20 10:30:00
+
+### Latest Report (cycle-3.md)
+- Tasks completed: 5
+- Tasks remaining: 3
+- Status: CONTINUING
+
+[... report contents ...]
 
 User: /agentbase stop
-AgentBase: [signals planner to stop, planner writes final report]
+AgentBase:
+## AgentBase: Stop Signal Sent
+
+The Agent Planner will stop after completing its current cycle.
+Use '/agentbase status' to check if the agent has stopped.
+
+User: /agentbase cleanup
+AgentBase:
+## AgentBase: Cleanup
+
+Removing lock file...
+Found 3 report files. Remove all reports?
+
+User: [confirms]
+AgentBase: Reports removed. Cleanup complete.
 ```
