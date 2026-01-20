@@ -39,7 +39,7 @@ Workers operate on isolated **workstreams** (e.g., `frontend`, `backend`, `api`)
 ```bash
 
 # 0. Clone repo
-https://github.com/sidmohan0/agentbase.git
+git clone https://github.com/sidmohan0/agentbase.git
 
 # 1. Install the skill
 cp -r skill/ ~/.claude/skills/agentbase/
